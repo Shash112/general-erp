@@ -1,0 +1,14 @@
+{
+  "extends": "./packages/config/tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@general-erp/core": ["./packages/core/src/index.ts"],
+      "@general-erp/core/*": ["./packages/core/src/*"],
+      "@general-erp/database": ["./packages/database/src/index.ts"],
+      "@general-erp/database/*": ["./packages/database/src/*"]
+    }
+  },
+  "include": ["apps/**/*", "packages/**/*"],
+  "exclude": ["node_modules", "dist"]
+}

@@ -1,0 +1,29 @@
+{
+  "name": "general-erp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "General ERP - Enterprise-grade modular monolith for Indian SMEs",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run --prefix apps/api dev",
+    "build": "npm run --prefix packages/core build && npm run --prefix packages/database build && npm run --prefix packages/ui build && npm run --prefix apps/api build && npm run --prefix apps/web build",
+    "typecheck": "npm run --prefix packages/core typecheck && npm run --prefix packages/database typecheck && npm run --prefix apps/api typecheck && npm run --prefix apps/web typecheck",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:migrate": "npm run --prefix packages/database db:migrate",
+    "db:seed": "npm run --prefix packages/database db:seed"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/react": "^18.2.48",
+    "@types/react-dom": "^18.2.18",
+    "typescript": "^5.3.3",
+    "vitest": "^1.2.1"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
