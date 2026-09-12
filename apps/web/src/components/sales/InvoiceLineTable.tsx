@@ -3,6 +3,8 @@ import React from 'react';
 export interface SalesInvoiceLineItem {
   id: string;
   lineNumber: number;
+  salesOrderLineId?: string | null;
+  salesDeliveryLineId?: string | null;
   productCodeSnapshot: string;
   productNameSnapshot: string;
   description?: string | null;
@@ -33,7 +35,7 @@ export const InvoiceLineTable: React.FC<InvoiceLineTableProps> = ({ lines }) => 
             <th style={{ padding: '10px 14px', textAlign: 'right' }}>Qty</th>
             <th style={{ padding: '10px 14px', textAlign: 'right' }}>Unit Price</th>
             <th style={{ padding: '10px 14px', textAlign: 'right' }}>Taxable</th>
-            <th style={{ padding: '10px 14px', textAlign: 'right' }}>GST</th>
+            <th style={{ padding: '10px 14px', textAlign: 'right' }}>Tax (CGST/SGST/IGST)</th>
             <th style={{ padding: '10px 14px', textAlign: 'right' }}>Total</th>
           </tr>
         </thead>
@@ -43,7 +45,10 @@ export const InvoiceLineTable: React.FC<InvoiceLineTableProps> = ({ lines }) => 
               <td style={{ padding: '10px 14px', color: '#94a3b8' }}>{line.lineNumber}</td>
               <td style={{ padding: '10px 14px' }}>
                 <div style={{ fontWeight: 600, color: '#0f172a' }}>{line.productNameSnapshot}</div>
-                <div style={{ fontSize: '11px', color: '#64748b' }}>Code: {line.productCodeSnapshot}</div>
+                <div style={{ fontSize: '11px', color: '#64748b' }}>
+                  Code: {line.productCodeSnapshot}
+                  {line.salesDeliveryLineId && <span style={{ marginLeft: '8px', color: '#0284c7' }}>(Delivery Line Ref)</span>}
+                </div>
               </td>
               <td style={{ padding: '10px 14px', textAlign: 'center', color: '#475569' }}>{line.uom}</td>
               <td style={{ padding: '10px 14px', textAlign: 'right', fontWeight: 600 }}>
@@ -56,7 +61,14 @@ export const InvoiceLineTable: React.FC<InvoiceLineTableProps> = ({ lines }) => 
                 ₹{parseFloat(line.taxableAmount).toFixed(2)}
               </td>
               <td style={{ padding: '10px 14px', textAlign: 'right', color: '#0284c7' }}>
-                ₹{parseFloat(line.taxAmount).toFixed(2)}
+                <div>₹{parseFloat(line.taxAmount).toFixed(2)}</div>
+                {(parseFloat(line.cgstAmount) > 0 || parseFloat(line.sgstAmount) > 0 || parseFloat(line.igstAmount) > 0) && (
+                  <div style={{ fontSize: '10px', color: '#64748b' }}>
+                    {parseFloat(line.cgstAmount) > 0 && `C: ₹${parseFloat(line.cgstAmount).toFixed(2)} `}
+                    {parseFloat(line.sgstAmount) > 0 && `S: ₹${parseFloat(line.sgstAmount).toFixed(2)} `}
+                    {parseFloat(line.igstAmount) > 0 && `I: ₹${parseFloat(line.igstAmount).toFixed(2)}`}
+                  </div>
+                )}
               </td>
               <td style={{ padding: '10px 14px', textAlign: 'right', fontWeight: 600, color: '#0f172a' }}>
                 ₹{parseFloat(line.lineTotal).toFixed(2)}

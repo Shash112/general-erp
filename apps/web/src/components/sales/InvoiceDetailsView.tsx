@@ -6,6 +6,9 @@ export interface FullSalesInvoice {
   invoiceNumber: string;
   salesOrderId?: string | null;
   salesOrderNumber?: string | null;
+  salesDeliveryId?: string | null;
+  salesDeliveryNumber?: string | null;
+  invoicingMode?: 'DELIVERY' | 'ORDER';
   customerId: string;
   invoiceDate: string;
   dueDate: string;
@@ -84,7 +87,10 @@ export const InvoiceDetailsView: React.FC<InvoiceDetailsViewProps> = ({
             </span>
           </div>
           <p style={{ margin: '4px 0 0 0', fontSize: '12px', color: '#64748b' }}>
-            Order: <strong>{invoice.salesOrderNumber || 'N/A'}</strong> | Date: {invoice.invoiceDate} | Due: {invoice.dueDate}
+            Mode: <strong>{invoice.invoicingMode || (invoice.salesDeliveryId ? 'DELIVERY' : 'ORDER')}</strong> |
+            Order: <strong>{invoice.salesOrderNumber || 'N/A'}</strong>
+            {invoice.salesDeliveryNumber && <> | Delivery: <strong>{invoice.salesDeliveryNumber}</strong></>} |
+            Date: {invoice.invoiceDate} | Due: {invoice.dueDate}
           </p>
         </div>
 

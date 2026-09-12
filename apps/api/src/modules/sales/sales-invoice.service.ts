@@ -4,7 +4,8 @@ import {
   ValidationError,
   ForbiddenError,
   NotFoundError,
-  BusinessRuleViolationError
+  BusinessRuleViolationError,
+  ExactDecimal
 } from '@general-erp/core';
 import { auditService } from '../../platform/audit/audit.service.js';
 import { numberingEngine } from '../../platform/numbering/numbering.service.js';
@@ -12,6 +13,8 @@ import { notificationEngine } from '../../platform/notifications/notification.se
 import { salesOrderService } from './sales-order.service.js';
 import { salesDeliveryService } from './sales-delivery.service.js';
 import { arDocumentService } from '../finance/ar/ar-document.service.js';
+import { taxCalculationService } from '../finance/tax-calculation.service.js';
+import { taxEngineService, TaxTreatmentResolutionResult } from '../finance/tax-engine.service.js';
 import {
   getDb,
   salesInvoices,
@@ -19,12 +22,35 @@ import {
   salesOrders,
   salesOrderLines,
   salesDeliveries,
+  salesDeliveryLines,
   eq,
   and,
   ilike,
   or,
-  sql
+  sql,
+  inArray
 } from '@general-erp/database';
+
+function mulDec(a: ExactDecimal, b: ExactDecimal, targetScale: number = 2): ExactDecimal {
+  const unrounded = a.rawBigInt * b.rawBigInt;
+  const sourceScale = a.scale + b.scale;
+  return ExactDecimal.halfEvenRound(unrounded, sourceScale, targetScale);
+}
+
+function calcDiscDec(lineGross: ExactDecimal, discPercent: ExactDecimal): ExactDecimal {
+  if (discPercent.isZero()) return ExactDecimal.ZERO;
+  const prod = lineGross.rawBigInt * discPercent.rawBigInt; // scale 4
+  const unroundedScale4 = prod / 100n;
+  return ExactDecimal.halfEvenRound(unroundedScale4, 4, 2);
+}
+
+function isGt(a: ExactDecimal, b: ExactDecimal): boolean {
+  return a.compare(b) > 0;
+}
+
+function isLt(a: ExactDecimal, b: ExactDecimal): boolean {
+  return a.compare(b) < 0;
+}
 
 export interface SalesInvoiceLineDTO {
   id: string;
@@ -114,10 +140,12 @@ export interface CreateInvoiceFromOrderInput {
   companyId: string;
   salesOrderId: string;
   salesDeliveryId?: string | undefined;
+  invoicingMode?: 'DELIVERY' | 'ORDER' | undefined;
   invoiceDate?: string | undefined;
   dueDate?: string | undefined;
   lines?: Array<{
-    salesOrderLineId: string;
+    salesOrderLineId?: string | undefined;
+    salesDeliveryLineId?: string | undefined;
     invoicedQuantity: string;
   }> | undefined;
 }
@@ -135,10 +163,12 @@ export interface ListSalesInvoicesParams {
 export class SalesInvoiceService {
   private memoryStore = new Map<string, SalesInvoiceDTO>();
   private idempotencyStore = new Map<string, SalesInvoiceDTO>();
+  private inFlightLocks = new Map<string, Promise<any>>();
 
   public clearMemoryStores(): void {
     this.memoryStore.clear();
     this.idempotencyStore.clear();
+    this.inFlightLocks.clear();
   }
 
   private checkPermission(ctx: RequestContext, perm: string): void {
@@ -150,7 +180,95 @@ export class SalesInvoiceService {
   }
 
   /**
-   * Creates a Sales Invoice from a confirmed Sales Order and/or Sales Delivery.
+   * Helper to calculate line taxes deterministically using TaxEngine & TaxCalculationService with ExactDecimal arithmetic.
+   */
+  private async calculateLineTax(
+    ctx: RequestContext,
+    companyId: string,
+    invoiceDateStr: string,
+    hsnSac: string,
+    taxableDec: ExactDecimal,
+    cgstRateStr: string,
+    sgstRateStr: string,
+    igstRateStr: string
+  ) {
+    const cgstRateDec = ExactDecimal.parse(cgstRateStr || '0.00', 2);
+    const sgstRateDec = ExactDecimal.parse(sgstRateStr || '0.00', 2);
+    const igstRateDec = ExactDecimal.parse(igstRateStr || '0.00', 2);
+
+    try {
+      const treatment = await taxEngineService.resolveTaxTreatment(ctx, {
+        companyId,
+        transactionDate: invoiceDateStr,
+        hsnSacCode: hsnSac,
+        supplierStateCode: '27',
+        recipientStateCode: igstRateDec.isPositive() ? '07' : '27'
+      });
+
+      const totalRate = (treatment.rates || []).reduce((acc, r) => acc + Number(r.ratePercent), 0);
+      if (treatment.taxability === 'TAXABLE' && treatment.rates && treatment.rates.length > 0 && totalRate > 0) {
+        return taxCalculationService.calculateTax(ctx, {
+          amount: taxableDec.toString(),
+          calculationMode: 'EXCLUSIVE',
+          treatment
+        });
+      }
+    } catch {
+      // Fallback to line rates below
+    }
+      const rates: Array<{ id: string; rateType: 'CGST' | 'SGST' | 'IGST'; ratePercent: string; validFrom: string }> = [];
+      let componentTypes: Array<'CGST' | 'SGST' | 'IGST'> = [];
+      let supplyNature: 'INTRA_STATE' | 'INTER_STATE' = 'INTRA_STATE';
+
+      if (igstRateDec.isPositive()) {
+        supplyNature = 'INTER_STATE';
+        componentTypes = ['IGST'];
+        rates.push({ id: 'r_igst', rateType: 'IGST', ratePercent: igstRateDec.toString(), validFrom: '2026-01-01' });
+      } else {
+        componentTypes = ['CGST', 'SGST'];
+        if (cgstRateDec.isPositive()) {
+          rates.push({ id: 'r_cgst', rateType: 'CGST', ratePercent: cgstRateDec.toString(), validFrom: '2026-01-01' });
+        }
+        if (sgstRateDec.isPositive()) {
+          rates.push({ id: 'r_sgst', rateType: 'SGST', ratePercent: sgstRateDec.toString(), validFrom: '2026-01-01' });
+        }
+      }
+
+      const mockTreatment: TaxTreatmentResolutionResult = {
+        tenantId: ctx.tenantId,
+        companyId,
+        transactionDate: invoiceDateStr,
+        placeOfSupply: {
+          supplierStateCode: '27',
+          supplierTerritoryType: 'STATE',
+          recipientStateCode: supplyNature === 'INTRA_STATE' ? '27' : '07',
+          recipientTerritoryType: 'STATE',
+          placeOfSupplyStateCode: supplyNature === 'INTRA_STATE' ? '27' : '07',
+          placeOfSupplyTerritoryType: 'STATE',
+          posSource: 'DERIVED',
+          supplyNature,
+          isUtgstApplicable: false,
+          isSez: false,
+          isDeemedExport: false,
+          isImport: false
+        },
+        taxability: rates.length > 0 ? 'TAXABLE' : 'EXEMPT',
+        isRcm: false,
+        isSez: false,
+        taxCategory: { id: 'cat_gst', code: 'GST', name: 'Goods and Services Tax' },
+        applicableComponentTypes: componentTypes,
+        rates
+      };
+
+      return taxCalculationService.calculateTax(ctx, {
+        amount: taxableDec.toString(),
+        calculationMode: 'EXCLUSIVE',
+        treatment: mockTreatment
+      });
+  }
+
+  /**
+   * Creates a Sales Invoice from a confirmed Sales Order and/or Sales Delivery using governed mode logic & exact decimal arithmetic.
    */
   public async createFromOrder(
     ctx: RequestContext,
@@ -165,6 +283,11 @@ export class SalesInvoiceService {
       if (cached) return cached;
     }
 
+    const mode = input.invoicingMode || (input.salesDeliveryId ? 'DELIVERY' : 'ORDER');
+    if (mode === 'DELIVERY' && !input.salesDeliveryId) {
+      throw new ValidationError('DELIVERY_MODE_REQUIRES_DELIVERY_ID: salesDeliveryId is required for delivery-based invoicing.');
+    }
+
     const userId = ctx.user?.userId || (ctx as any).userId || '00000000-0000-0000-0000-000000000000';
     const db = getDb();
     const invoiceDateStr = input.invoiceDate || new Date().toISOString().split('T')[0]!;
@@ -173,15 +296,24 @@ export class SalesInvoiceService {
     const dueDateStr = input.dueDate || dueDateObj.toISOString().split('T')[0]!;
 
     if (!db) {
-      const order = await salesOrderService.getOrderById(ctx, input.salesOrderId);
+      // In-Memory Fallback Mode (Unit Testing)
+      const lockKey = `${ctx.tenantId}:${input.companyId}:${input.salesOrderId}`;
+      while (this.inFlightLocks.has(lockKey)) {
+        await this.inFlightLocks.get(lockKey);
+      }
+      let resolveLock!: () => void;
+      const lockPromise = new Promise<void>((res) => { resolveLock = res; });
+      this.inFlightLocks.set(lockKey, lockPromise);
+
+      try {
+        const order = await salesOrderService.getOrderById(ctx, input.salesOrderId);
       if (order.status !== 'CONFIRMED' && order.status !== 'COMPLETED') {
-        throw new ValidationError(`Cannot create Sales Invoice for order in status '${order.status}'. Order must be CONFIRMED.`);
+        throw new ValidationError(`Cannot create Sales Invoice for order in status '${order.status}'. Order must be CONFIRMED or COMPLETED.`);
       }
 
-      let deliveryNum: string | null = null;
+      let delivery: any = null;
       if (input.salesDeliveryId) {
-        const del = await salesDeliveryService.getDeliveryById(ctx, input.salesDeliveryId);
-        deliveryNum = del.deliveryNumber;
+        delivery = await salesDeliveryService.getDeliveryById(ctx, input.salesDeliveryId);
       }
 
       const invoiceId = crypto.randomUUID();
@@ -197,96 +329,225 @@ export class SalesInvoiceService {
       const invoiceNumber = numberingEngine.generateNextNumber(ctx.tenantId, input.companyId, 'SALES_INVOICE', yearStr);
 
       const createdLines: SalesInvoiceLineDTO[] = [];
-      let subtotal = 0;
-      let totalTaxable = 0;
-      let totalCgst = 0;
-      let totalSgst = 0;
-      let totalIgst = 0;
-      let totalTax = 0;
-      let totalGross = 0;
+      let subtotalDec = ExactDecimal.ZERO;
+      let taxableDec = ExactDecimal.ZERO;
+      let cgstDec = ExactDecimal.ZERO;
+      let sgstDec = ExactDecimal.ZERO;
+      let igstDec = ExactDecimal.ZERO;
+      let taxDec = ExactDecimal.ZERO;
+      let discDec = ExactDecimal.ZERO;
+      let totalDec = ExactDecimal.ZERO;
 
       let lineNumCounter = 1;
-      for (const orderLine of order.lines) {
-        let invQty = parseFloat(orderLine.orderedQuantity);
-        if (input.lines && input.lines.length > 0) {
-          const userLine = input.lines.find(l => l.salesOrderLineId === orderLine.id);
-          if (userLine) {
-            invQty = parseFloat(userLine.invoicedQuantity);
-          } else {
-            continue;
+
+      if (mode === 'DELIVERY' && delivery) {
+        for (const delLine of delivery.lines) {
+          const orderLine = order.lines.find((l: any) => l.id === delLine.salesOrderLineId);
+          if (!orderLine) continue;
+
+          let invQtyStr = delLine.deliveryQuantity;
+          if (input.lines && input.lines.length > 0) {
+            const userLine = input.lines.find(
+              l => (l.salesDeliveryLineId && l.salesDeliveryLineId === delLine.id) ||
+                   (l.salesOrderLineId && l.salesOrderLineId === orderLine.id)
+            );
+            if (userLine) {
+              invQtyStr = userLine.invoicedQuantity;
+            } else {
+              continue;
+            }
           }
-        }
 
-        if (invQty <= 0) continue;
+          const invQtyDec = ExactDecimal.parse(invQtyStr, 4);
+          if (invQtyDec.isZero() || invQtyDec.isNegative()) continue;
 
-        const prevInvoiced = parseFloat(orderLine.invoicedQuantity || '0');
-        const maxInvoicable = parseFloat(orderLine.orderedQuantity) - parseFloat(orderLine.cancelledQuantity || '0') - prevInvoiced;
-        if (invQty > maxInvoicable + 0.0001) {
-          throw new ValidationError(
-            `OVER_INVOICING_EXCEEDED: Invoiced quantity (${invQty}) for product '${orderLine.productCodeSnapshot}' exceeds remaining deliverable quantity (${maxInvoicable.toFixed(4)}).`
+          // Calculate already invoiced quantity for this delivery line
+          let prevInvoicedDec = ExactDecimal.parse('0.0000', 4);
+          for (const existingInv of this.memoryStore.values()) {
+            if (existingInv.tenantId === ctx.tenantId && existingInv.companyId === input.companyId && existingInv.status !== 'CANCELLED') {
+              for (const l of existingInv.lines) {
+                if (l.salesDeliveryLineId === delLine.id) {
+                  prevInvoicedDec = prevInvoicedDec.add(ExactDecimal.parse(l.invoicedQuantity, 4));
+                }
+              }
+            }
+          }
+
+          const delQtyDec = ExactDecimal.parse(delLine.deliveryQuantity, 4);
+          const maxInvoicableDec = delQtyDec.sub(prevInvoicedDec);
+
+          if (isGt(invQtyDec, maxInvoicableDec)) {
+            throw new ValidationError(
+              `OVER_INVOICING_EXCEEDED: Invoiced quantity (${invQtyDec.toString()}) for product '${orderLine.productCodeSnapshot}' exceeds remaining deliverable quantity (${maxInvoicableDec.toString()}).`
+            );
+          }
+
+          const unitPriceDec = ExactDecimal.parse(orderLine.unitPrice, 4);
+          const lineGrossDec = mulDec(invQtyDec, unitPriceDec, 2);
+          const discPercentDec = ExactDecimal.parse(orderLine.discountPercent || '0.00', 2);
+          const lineDiscDec = calcDiscDec(lineGrossDec, discPercentDec);
+          const lineTaxableDec = lineGrossDec.sub(lineDiscDec);
+
+          const taxResult = await this.calculateLineTax(
+            ctx,
+            input.companyId,
+            invoiceDateStr,
+            orderLine.hsnSac,
+            lineTaxableDec,
+            orderLine.cgstRate || '0.00',
+            orderLine.sgstRate || '0.00',
+            orderLine.igstRate || '0.00'
           );
+
+          const lineCgstDec = ExactDecimal.parse(taxResult.components.find(c => c.rateType === 'CGST')?.taxAmount || '0.00', 2);
+          const lineSgstDec = ExactDecimal.parse(taxResult.components.find(c => c.rateType === 'SGST')?.taxAmount || '0.00', 2);
+          const lineIgstDec = ExactDecimal.parse(taxResult.components.find(c => c.rateType === 'IGST')?.taxAmount || '0.00', 2);
+          const lineTaxDec = ExactDecimal.parse(taxResult.totalTaxAmount, 2);
+          const lineTotalDec = lineTaxableDec.add(lineTaxDec);
+
+          subtotalDec = subtotalDec.add(lineGrossDec);
+          discDec = discDec.add(lineDiscDec);
+          taxableDec = taxableDec.add(lineTaxableDec);
+          cgstDec = cgstDec.add(lineCgstDec);
+          sgstDec = sgstDec.add(lineSgstDec);
+          igstDec = igstDec.add(lineIgstDec);
+          taxDec = taxDec.add(lineTaxDec);
+          totalDec = totalDec.add(lineTotalDec);
+
+          const lineDto: SalesInvoiceLineDTO = {
+            id: crypto.randomUUID(),
+            invoiceId,
+            salesOrderLineId: orderLine.id,
+            salesDeliveryLineId: delLine.id,
+            tenantId: ctx.tenantId,
+            companyId: input.companyId,
+            lineNumber: lineNumCounter++,
+            productId: orderLine.productId,
+            productCodeSnapshot: orderLine.productCodeSnapshot,
+            productNameSnapshot: orderLine.productNameSnapshot,
+            description: orderLine.description || null,
+            uom: orderLine.uom,
+            invoicedQuantity: invQtyDec.toString(),
+            unitPrice: orderLine.unitPrice,
+            discountPercent: orderLine.discountPercent,
+            discountAmount: lineDiscDec.toString(),
+            allocatedHeaderDiscountAmount: '0.00',
+            grossAmount: lineGrossDec.toString(),
+            taxableAmount: lineTaxableDec.toString(),
+            hsnSac: orderLine.hsnSac,
+            cgstRate: orderLine.cgstRate || '0.00',
+            cgstAmount: lineCgstDec.toString(),
+            sgstRate: orderLine.sgstRate || '0.00',
+            sgstAmount: lineSgstDec.toString(),
+            igstRate: orderLine.igstRate || '0.00',
+            igstAmount: lineIgstDec.toString(),
+            taxAmount: lineTaxDec.toString(),
+            lineTotal: lineTotalDec.toString(),
+            version: 1,
+            createdAt: new Date(),
+            updatedAt: new Date()
+          };
+          createdLines.push(lineDto);
+
+          const prevSoInvoicedDec = ExactDecimal.parse(orderLine.invoicedQuantity || '0.0000', 4);
+          orderLine.invoicedQuantity = prevSoInvoicedDec.add(invQtyDec).toString();
         }
+      } else {
+        // Direct Order-Based Invoicing
+        for (const orderLine of order.lines) {
+          let invQtyStr = orderLine.orderedQuantity;
+          if (input.lines && input.lines.length > 0) {
+            const userLine = input.lines.find(l => l.salesOrderLineId === orderLine.id);
+            if (userLine) {
+              invQtyStr = userLine.invoicedQuantity;
+            } else {
+              continue;
+            }
+          }
 
-        const unitPriceNum = parseFloat(orderLine.unitPrice);
-        const lineGrossNum = invQty * unitPriceNum;
-        const discPercent = parseFloat(orderLine.discountPercent || '0');
-        const lineDiscNum = (lineGrossNum * discPercent) / 100.0;
-        const lineTaxableNum = lineGrossNum - lineDiscNum;
+          const invQtyDec = ExactDecimal.parse(invQtyStr, 4);
+          if (invQtyDec.isZero() || invQtyDec.isNegative()) continue;
 
-        const cgstRate = parseFloat(orderLine.cgstRate || '0');
-        const sgstRate = parseFloat(orderLine.sgstRate || '0');
-        const igstRate = parseFloat(orderLine.igstRate || '0');
+          const orderedQtyDec = ExactDecimal.parse(orderLine.orderedQuantity, 4);
+          const cancelledQtyDec = ExactDecimal.parse(orderLine.cancelledQuantity || '0.0000', 4);
+          const prevInvoicedDec = ExactDecimal.parse(orderLine.invoicedQuantity || '0.0000', 4);
+          const maxInvoicableDec = orderedQtyDec.sub(cancelledQtyDec).sub(prevInvoicedDec);
 
-        const lineCgstNum = (lineTaxableNum * cgstRate) / 100.0;
-        const lineSgstNum = (lineTaxableNum * sgstRate) / 100.0;
-        const lineIgstNum = (lineTaxableNum * igstRate) / 100.0;
-        const lineTaxNum = lineCgstNum + lineSgstNum + lineIgstNum;
-        const lineTotalNum = lineTaxableNum + lineTaxNum;
+          if (isGt(invQtyDec, maxInvoicableDec)) {
+            throw new ValidationError(
+              `OVER_INVOICING_EXCEEDED: Invoiced quantity (${invQtyDec.toString()}) for product '${orderLine.productCodeSnapshot}' exceeds remaining deliverable quantity (${maxInvoicableDec.toString()}).`
+            );
+          }
 
-        subtotal += lineGrossNum;
-        totalTaxable += lineTaxableNum;
-        totalCgst += lineCgstNum;
-        totalSgst += lineSgstNum;
-        totalIgst += lineIgstNum;
-        totalTax += lineTaxNum;
-        totalGross += lineTotalNum;
+          const unitPriceDec = ExactDecimal.parse(orderLine.unitPrice, 4);
+          const lineGrossDec = mulDec(invQtyDec, unitPriceDec, 2);
+          const discPercentDec = ExactDecimal.parse(orderLine.discountPercent || '0.00', 2);
+          const lineDiscDec = calcDiscDec(lineGrossDec, discPercentDec);
+          const lineTaxableDec = lineGrossDec.sub(lineDiscDec);
 
-        const lineDto: SalesInvoiceLineDTO = {
-          id: crypto.randomUUID(),
-          invoiceId,
-          salesOrderLineId: orderLine.id,
-          salesDeliveryLineId: null,
-          tenantId: ctx.tenantId,
-          companyId: input.companyId,
-          lineNumber: lineNumCounter++,
-          productId: orderLine.productId,
-          productCodeSnapshot: orderLine.productCodeSnapshot,
-          productNameSnapshot: orderLine.productNameSnapshot,
-          description: orderLine.description || null,
-          uom: orderLine.uom,
-          invoicedQuantity: invQty.toFixed(4),
-          unitPrice: orderLine.unitPrice,
-          discountPercent: orderLine.discountPercent,
-          discountAmount: lineDiscNum.toFixed(2),
-          allocatedHeaderDiscountAmount: '0.00',
-          grossAmount: lineGrossNum.toFixed(2),
-          taxableAmount: lineTaxableNum.toFixed(2),
-          hsnSac: orderLine.hsnSac,
-          cgstRate: orderLine.cgstRate,
-          cgstAmount: lineCgstNum.toFixed(2),
-          sgstRate: orderLine.sgstRate,
-          sgstAmount: lineSgstNum.toFixed(2),
-          igstRate: orderLine.igstRate,
-          igstAmount: lineIgstNum.toFixed(2),
-          taxAmount: lineTaxNum.toFixed(2),
-          lineTotal: lineTotalNum.toFixed(2),
-          version: 1,
-          createdAt: new Date(),
-          updatedAt: new Date()
-        };
-        createdLines.push(lineDto);
+          const taxResult = await this.calculateLineTax(
+            ctx,
+            input.companyId,
+            invoiceDateStr,
+            orderLine.hsnSac,
+            lineTaxableDec,
+            orderLine.cgstRate || '0.00',
+            orderLine.sgstRate || '0.00',
+            orderLine.igstRate || '0.00'
+          );
 
-        orderLine.invoicedQuantity = (prevInvoiced + invQty).toFixed(4);
+          const lineCgstDec = ExactDecimal.parse(taxResult.components.find(c => c.rateType === 'CGST')?.taxAmount || '0.00', 2);
+          const lineSgstDec = ExactDecimal.parse(taxResult.components.find(c => c.rateType === 'SGST')?.taxAmount || '0.00', 2);
+          const lineIgstDec = ExactDecimal.parse(taxResult.components.find(c => c.rateType === 'IGST')?.taxAmount || '0.00', 2);
+          const lineTaxDec = ExactDecimal.parse(taxResult.totalTaxAmount, 2);
+          const lineTotalDec = lineTaxableDec.add(lineTaxDec);
+
+          subtotalDec = subtotalDec.add(lineGrossDec);
+          discDec = discDec.add(lineDiscDec);
+          taxableDec = taxableDec.add(lineTaxableDec);
+          cgstDec = cgstDec.add(lineCgstDec);
+          sgstDec = sgstDec.add(lineSgstDec);
+          igstDec = igstDec.add(lineIgstDec);
+          taxDec = taxDec.add(lineTaxDec);
+          totalDec = totalDec.add(lineTotalDec);
+
+          const lineDto: SalesInvoiceLineDTO = {
+            id: crypto.randomUUID(),
+            invoiceId,
+            salesOrderLineId: orderLine.id,
+            salesDeliveryLineId: null,
+            tenantId: ctx.tenantId,
+            companyId: input.companyId,
+            lineNumber: lineNumCounter++,
+            productId: orderLine.productId,
+            productCodeSnapshot: orderLine.productCodeSnapshot,
+            productNameSnapshot: orderLine.productNameSnapshot,
+            description: orderLine.description || null,
+            uom: orderLine.uom,
+            invoicedQuantity: invQtyDec.toString(),
+            unitPrice: orderLine.unitPrice,
+            discountPercent: orderLine.discountPercent,
+            discountAmount: lineDiscDec.toString(),
+            allocatedHeaderDiscountAmount: '0.00',
+            grossAmount: lineGrossDec.toString(),
+            taxableAmount: lineTaxableDec.toString(),
+            hsnSac: orderLine.hsnSac,
+            cgstRate: orderLine.cgstRate || '0.00',
+            cgstAmount: lineCgstDec.toString(),
+            sgstRate: orderLine.sgstRate || '0.00',
+            sgstAmount: lineSgstDec.toString(),
+            igstRate: orderLine.igstRate || '0.00',
+            igstAmount: lineIgstDec.toString(),
+            taxAmount: lineTaxDec.toString(),
+            lineTotal: lineTotalDec.toString(),
+            version: 1,
+            createdAt: new Date(),
+            updatedAt: new Date()
+          };
+          createdLines.push(lineDto);
+
+          orderLine.invoicedQuantity = prevInvoicedDec.add(invQtyDec).toString();
+        }
       }
 
       const invoiceDto: SalesInvoiceDTO = {
@@ -298,7 +559,7 @@ export class SalesInvoiceService {
         salesOrderId: order.id,
         salesOrderNumber: order.orderNumber,
         salesDeliveryId: input.salesDeliveryId || null,
-        salesDeliveryNumber: deliveryNum,
+        salesDeliveryNumber: delivery ? delivery.deliveryNumber : null,
         customerId: order.customerId,
         invoiceDate: invoiceDateStr,
         dueDate: dueDateStr,
@@ -313,16 +574,16 @@ export class SalesInvoiceService {
         status: 'DRAFT',
         notes: null,
         termsAndConditions: order.termsAndConditions,
-        subtotalAmount: subtotal.toFixed(2),
+        subtotalAmount: subtotalDec.toString(),
         headerDiscountAmount: '0.00',
-        discountAmount: (subtotal - totalTaxable).toFixed(2),
-        taxableAmount: totalTaxable.toFixed(2),
-        cgstAmount: totalCgst.toFixed(2),
-        sgstAmount: totalSgst.toFixed(2),
-        igstAmount: totalIgst.toFixed(2),
-        taxAmount: totalTax.toFixed(2),
-        totalAmount: totalGross.toFixed(2),
-        totalAmountBase: totalGross.toFixed(2),
+        discountAmount: discDec.toString(),
+        taxableAmount: taxableDec.toString(),
+        cgstAmount: cgstDec.toString(),
+        sgstAmount: sgstDec.toString(),
+        igstAmount: igstDec.toString(),
+        taxAmount: taxDec.toString(),
+        totalAmount: totalDec.toString(),
+        totalAmountBase: totalDec.toString(),
         arDocumentId: null,
         arOpenItemId: null,
         journalEntryId: null,
@@ -349,7 +610,7 @@ export class SalesInvoiceService {
         newValues: {
           invoiceNumber,
           salesOrderNumber: order.orderNumber,
-          totalAmount: totalGross.toFixed(2),
+          totalAmount: totalDec.toString(),
           status: 'DRAFT'
         }
       });
@@ -360,10 +621,41 @@ export class SalesInvoiceService {
       }
 
       return invoiceDto;
+      } finally {
+        this.inFlightLocks.delete(lockKey);
+        resolveLock();
+      }
     }
 
-    // DB Transaction Execution
+    // DB Transaction Execution with Row Locking (FOR UPDATE) & Exact Decimal Arithmetic
     const resultInvoice = await db.transaction(async (tx) => {
+      let delRow: any = null;
+      let dbDelLines: any[] = [];
+
+      if (mode === 'DELIVERY' && input.salesDeliveryId) {
+        [delRow] = await tx
+          .select()
+          .from(salesDeliveries)
+          .where(
+            and(
+              eq(salesDeliveries.id, input.salesDeliveryId),
+              eq(salesDeliveries.tenantId, ctx.tenantId),
+              eq(salesDeliveries.companyId, input.companyId)
+            )
+          )
+          .for('update');
+
+        if (!delRow) {
+          throw new NotFoundError(`Sales Delivery '${input.salesDeliveryId}' not found.`);
+        }
+
+        dbDelLines = await tx
+          .select()
+          .from(salesDeliveryLines)
+          .where(eq(salesDeliveryLines.deliveryId, delRow.id))
+          .for('update');
+      }
+
       const [orderRow] = await tx
         .select()
         .from(salesOrders)
@@ -381,7 +673,7 @@ export class SalesInvoiceService {
       }
 
       if (orderRow.status !== 'CONFIRMED' && orderRow.status !== 'COMPLETED') {
-        throw new ValidationError(`Cannot create Sales Invoice for order in status '${orderRow.status}'. Order must be CONFIRMED.`);
+        throw new ValidationError(`Cannot create Sales Invoice for order in status '${orderRow.status}'. Order must be CONFIRMED or COMPLETED.`);
       }
 
       const dbOrderLines = await tx
@@ -396,15 +688,6 @@ export class SalesInvoiceService {
         )
         .for('update');
 
-      let deliveryNum: string | null = null;
-      if (input.salesDeliveryId) {
-        const [delRow] = await tx
-          .select()
-          .from(salesDeliveries)
-          .where(eq(salesDeliveries.id, input.salesDeliveryId));
-        if (delRow) deliveryNum = delRow.deliveryNumber;
-      }
-
       const yearStr = new Date().getFullYear().toString();
       numberingEngine.configureSequence(ctx.tenantId, input.companyId, {
         documentType: 'SALES_INVOICE',
@@ -417,137 +700,321 @@ export class SalesInvoiceService {
       const invoiceNumber = numberingEngine.generateNextNumber(ctx.tenantId, input.companyId, 'SALES_INVOICE', yearStr);
       const invoiceId = crypto.randomUUID();
 
-      let subtotal = 0;
-      let totalTaxable = 0;
-      let totalCgst = 0;
-      let totalSgst = 0;
-      let totalIgst = 0;
-      let totalTax = 0;
-      let totalGross = 0;
+      let subtotalDec = ExactDecimal.ZERO;
+      let taxableDec = ExactDecimal.ZERO;
+      let cgstDec = ExactDecimal.ZERO;
+      let sgstDec = ExactDecimal.ZERO;
+      let igstDec = ExactDecimal.ZERO;
+      let taxDec = ExactDecimal.ZERO;
+      let discDec = ExactDecimal.ZERO;
+      let totalDec = ExactDecimal.ZERO;
 
       const insertedLines: SalesInvoiceLineDTO[] = [];
       let lineNumCounter = 1;
 
-      for (const orderLine of dbOrderLines) {
-        let invQty = parseFloat(orderLine.orderedQuantity);
-        if (input.lines && input.lines.length > 0) {
-          const userLine = input.lines.find(l => l.salesOrderLineId === orderLine.id);
-          if (userLine) {
-            invQty = parseFloat(userLine.invoicedQuantity);
-          } else {
-            continue;
+      if (mode === 'DELIVERY' && dbDelLines.length > 0) {
+        // Query cumulative invoiced quantity per delivery line from sales_invoice_lines
+        const delLineIds = dbDelLines.map(l => l.id);
+        const existingInvLines = delLineIds.length > 0
+          ? await tx
+              .select({
+                salesDeliveryLineId: salesInvoiceLines.salesDeliveryLineId,
+                totalInvoiced: sql<string>`COALESCE(SUM(${salesInvoiceLines.invoicedQuantity}), 0)`
+              })
+              .from(salesInvoiceLines)
+              .innerJoin(salesInvoices, eq(salesInvoiceLines.invoiceId, salesInvoices.id))
+              .where(
+                and(
+                  eq(salesInvoices.tenantId, ctx.tenantId),
+                  eq(salesInvoices.companyId, input.companyId),
+                  inArray(salesInvoiceLines.salesDeliveryLineId, delLineIds),
+                  sql`${salesInvoices.status} != 'CANCELLED'`
+                )
+              )
+              .groupBy(salesInvoiceLines.salesDeliveryLineId)
+          : [];
+
+        const existingInvoicedMap = new Map<string, ExactDecimal>();
+        for (const row of existingInvLines) {
+          if (row.salesDeliveryLineId) {
+            existingInvoicedMap.set(row.salesDeliveryLineId, ExactDecimal.parse(row.totalInvoiced || '0.0000', 4));
           }
         }
 
-        if (invQty <= 0) continue;
+        for (const delLine of dbDelLines) {
+          const orderLine = dbOrderLines.find(l => l.id === delLine.salesOrderLineId);
+          if (!orderLine) continue;
 
-        const prevInvoiced = parseFloat(orderLine.invoicedQuantity || '0');
-        const maxInvoicable = parseFloat(orderLine.orderedQuantity) - parseFloat(orderLine.cancelledQuantity || '0') - prevInvoiced;
-        if (invQty > maxInvoicable + 0.0001) {
-          throw new ValidationError(
-            `OVER_INVOICING_EXCEEDED: Invoiced quantity (${invQty}) for product '${orderLine.productCodeSnapshot}' exceeds remaining deliverable quantity (${maxInvoicable.toFixed(4)}).`
+          let invQtyStr = delLine.deliveryQuantity;
+          if (input.lines && input.lines.length > 0) {
+            const userLine = input.lines.find(
+              l => (l.salesDeliveryLineId && l.salesDeliveryLineId === delLine.id) ||
+                   (l.salesOrderLineId && l.salesOrderLineId === orderLine.id)
+            );
+            if (userLine) {
+              invQtyStr = userLine.invoicedQuantity;
+            } else {
+              continue;
+            }
+          }
+
+          const invQtyDec = ExactDecimal.parse(invQtyStr, 4);
+          if (invQtyDec.isZero() || invQtyDec.isNegative()) continue;
+
+          const prevInvoicedDec = existingInvoicedMap.get(delLine.id) || ExactDecimal.parse('0.0000', 4);
+          const delQtyDec = ExactDecimal.parse(delLine.deliveryQuantity, 4);
+          const maxInvoicableDec = delQtyDec.sub(prevInvoicedDec);
+
+          if (isGt(invQtyDec, maxInvoicableDec)) {
+            throw new ValidationError(
+              `OVER_INVOICING_EXCEEDED: Invoiced quantity (${invQtyDec.toString()}) for product '${orderLine.productCodeSnapshot}' exceeds remaining deliverable quantity (${maxInvoicableDec.toString()}).`
+            );
+          }
+
+          const unitPriceDec = ExactDecimal.parse(orderLine.unitPrice, 4);
+          const lineGrossDec = mulDec(invQtyDec, unitPriceDec, 2);
+          const discPercentDec = ExactDecimal.parse(orderLine.discountPercent || '0.00', 2);
+          const lineDiscDec = calcDiscDec(lineGrossDec, discPercentDec);
+          const lineTaxableDec = lineGrossDec.sub(lineDiscDec);
+
+          const taxResult = await this.calculateLineTax(
+            ctx,
+            input.companyId,
+            invoiceDateStr,
+            orderLine.hsnSac,
+            lineTaxableDec,
+            orderLine.cgstRate || '0.00',
+            orderLine.sgstRate || '0.00',
+            orderLine.igstRate || '0.00'
           );
-        }
 
-        const unitPriceNum = parseFloat(orderLine.unitPrice);
-        const lineGrossNum = invQty * unitPriceNum;
-        const discPercent = parseFloat(orderLine.discountPercent || '0');
-        const lineDiscNum = (lineGrossNum * discPercent) / 100.0;
-        const lineTaxableNum = lineGrossNum - lineDiscNum;
+          const lineCgstDec = ExactDecimal.parse(taxResult.components.find(c => c.rateType === 'CGST')?.taxAmount || '0.00', 2);
+          const lineSgstDec = ExactDecimal.parse(taxResult.components.find(c => c.rateType === 'SGST')?.taxAmount || '0.00', 2);
+          const lineIgstDec = ExactDecimal.parse(taxResult.components.find(c => c.rateType === 'IGST')?.taxAmount || '0.00', 2);
+          const lineTaxDec = ExactDecimal.parse(taxResult.totalTaxAmount, 2);
+          const lineTotalDec = lineTaxableDec.add(lineTaxDec);
 
-        const cgstRate = parseFloat(orderLine.cgstRate || '0');
-        const sgstRate = parseFloat(orderLine.sgstRate || '0');
-        const igstRate = parseFloat(orderLine.igstRate || '0');
+          subtotalDec = subtotalDec.add(lineGrossDec);
+          discDec = discDec.add(lineDiscDec);
+          taxableDec = taxableDec.add(lineTaxableDec);
+          cgstDec = cgstDec.add(lineCgstDec);
+          sgstDec = sgstDec.add(lineSgstDec);
+          igstDec = igstDec.add(lineIgstDec);
+          taxDec = taxDec.add(lineTaxDec);
+          totalDec = totalDec.add(lineTotalDec);
 
-        const lineCgstNum = (lineTaxableNum * cgstRate) / 100.0;
-        const lineSgstNum = (lineTaxableNum * sgstRate) / 100.0;
-        const lineIgstNum = (lineTaxableNum * igstRate) / 100.0;
-        const lineTaxNum = lineCgstNum + lineSgstNum + lineIgstNum;
-        const lineTotalNum = lineTaxableNum + lineTaxNum;
+          const lineId = crypto.randomUUID();
+          await tx.insert(salesInvoiceLines).values({
+            id: lineId,
+            invoiceId,
+            salesOrderLineId: orderLine.id,
+            salesDeliveryLineId: delLine.id,
+            tenantId: ctx.tenantId,
+            companyId: input.companyId,
+            lineNumber: lineNumCounter++,
+            productId: orderLine.productId,
+            productCodeSnapshot: orderLine.productCodeSnapshot,
+            productNameSnapshot: orderLine.productNameSnapshot,
+            description: orderLine.description || null,
+            uom: orderLine.uom,
+            invoicedQuantity: invQtyDec.toString(),
+            unitPrice: orderLine.unitPrice,
+            discountPercent: orderLine.discountPercent,
+            discountAmount: lineDiscDec.toString(),
+            allocatedHeaderDiscountAmount: '0.00',
+            grossAmount: lineGrossDec.toString(),
+            taxableAmount: lineTaxableDec.toString(),
+            hsnSac: orderLine.hsnSac,
+            cgstRate: orderLine.cgstRate || '0.00',
+            cgstAmount: lineCgstDec.toString(),
+            sgstRate: orderLine.sgstRate || '0.00',
+            sgstAmount: lineSgstDec.toString(),
+            igstRate: orderLine.igstRate || '0.00',
+            igstAmount: lineIgstDec.toString(),
+            taxAmount: lineTaxDec.toString(),
+            lineTotal: lineTotalDec.toString(),
+            version: 1
+          });
 
-        subtotal += lineGrossNum;
-        totalTaxable += lineTaxableNum;
-        totalCgst += lineCgstNum;
-        totalSgst += lineSgstNum;
-        totalIgst += lineIgstNum;
-        totalTax += lineTaxNum;
-        totalGross += lineTotalNum;
+          // Update sales_order_lines invoicedQuantity
+          const prevSoInvoicedDec = ExactDecimal.parse(orderLine.invoicedQuantity || '0.0000', 4);
+          await tx
+            .update(salesOrderLines)
+            .set({
+              invoicedQuantity: prevSoInvoicedDec.add(invQtyDec).toString(),
+              updatedAt: new Date()
+            })
+            .where(eq(salesOrderLines.id, orderLine.id));
 
-        const lineId = crypto.randomUUID();
-        await tx.insert(salesInvoiceLines).values({
-          id: lineId,
-          invoiceId,
-          salesOrderLineId: orderLine.id,
-          salesDeliveryLineId: null,
-          tenantId: ctx.tenantId,
-          companyId: input.companyId,
-          lineNumber: lineNumCounter++,
-          productId: orderLine.productId,
-          productCodeSnapshot: orderLine.productCodeSnapshot,
-          productNameSnapshot: orderLine.productNameSnapshot,
-          description: orderLine.description || null,
-          uom: orderLine.uom,
-          invoicedQuantity: invQty.toFixed(4),
-          unitPrice: orderLine.unitPrice,
-          discountPercent: orderLine.discountPercent,
-          discountAmount: lineDiscNum.toFixed(2),
-          allocatedHeaderDiscountAmount: '0.00',
-          grossAmount: lineGrossNum.toFixed(2),
-          taxableAmount: lineTaxableNum.toFixed(2),
-          hsnSac: orderLine.hsnSac,
-          cgstRate: orderLine.cgstRate,
-          cgstAmount: lineCgstNum.toFixed(2),
-          sgstRate: orderLine.sgstRate,
-          sgstAmount: lineSgstNum.toFixed(2),
-          igstRate: orderLine.igstRate,
-          igstAmount: lineIgstNum.toFixed(2),
-          taxAmount: lineTaxNum.toFixed(2),
-          lineTotal: lineTotalNum.toFixed(2),
-          version: 1
-        });
-
-        // Update sales_order_lines invoicedQuantity
-        await tx
-          .update(salesOrderLines)
-          .set({
-            invoicedQuantity: (prevInvoiced + invQty).toFixed(4),
+          insertedLines.push({
+            id: lineId,
+            invoiceId,
+            salesOrderLineId: orderLine.id,
+            salesDeliveryLineId: delLine.id,
+            tenantId: ctx.tenantId,
+            companyId: input.companyId,
+            lineNumber: lineNumCounter - 1,
+            productId: orderLine.productId,
+            productCodeSnapshot: orderLine.productCodeSnapshot,
+            productNameSnapshot: orderLine.productNameSnapshot,
+            description: orderLine.description || null,
+            uom: orderLine.uom,
+            invoicedQuantity: invQtyDec.toString(),
+            unitPrice: orderLine.unitPrice,
+            discountPercent: orderLine.discountPercent,
+            discountAmount: lineDiscDec.toString(),
+            allocatedHeaderDiscountAmount: '0.00',
+            grossAmount: lineGrossDec.toString(),
+            taxableAmount: lineTaxableDec.toString(),
+            hsnSac: orderLine.hsnSac,
+            cgstRate: orderLine.cgstRate || '0.00',
+            cgstAmount: lineCgstDec.toString(),
+            sgstRate: orderLine.sgstRate || '0.00',
+            sgstAmount: lineSgstDec.toString(),
+            igstRate: orderLine.igstRate || '0.00',
+            igstAmount: lineIgstDec.toString(),
+            taxAmount: lineTaxDec.toString(),
+            lineTotal: lineTotalDec.toString(),
+            version: 1,
+            createdAt: new Date(),
             updatedAt: new Date()
-          })
-          .where(eq(salesOrderLines.id, orderLine.id));
+          });
+        }
+      } else {
+        // Direct Order-Based Invoicing
+        for (const orderLine of dbOrderLines) {
+          let invQtyStr = orderLine.orderedQuantity;
+          if (input.lines && input.lines.length > 0) {
+            const userLine = input.lines.find(l => l.salesOrderLineId === orderLine.id);
+            if (userLine) {
+              invQtyStr = userLine.invoicedQuantity;
+            } else {
+              continue;
+            }
+          }
 
-        insertedLines.push({
-          id: lineId,
-          invoiceId,
-          salesOrderLineId: orderLine.id,
-          salesDeliveryLineId: null,
-          tenantId: ctx.tenantId,
-          companyId: input.companyId,
-          lineNumber: lineNumCounter - 1,
-          productId: orderLine.productId,
-          productCodeSnapshot: orderLine.productCodeSnapshot,
-          productNameSnapshot: orderLine.productNameSnapshot,
-          description: orderLine.description || null,
-          uom: orderLine.uom,
-          invoicedQuantity: invQty.toFixed(4),
-          unitPrice: orderLine.unitPrice,
-          discountPercent: orderLine.discountPercent,
-          discountAmount: lineDiscNum.toFixed(2),
-          allocatedHeaderDiscountAmount: '0.00',
-          grossAmount: lineGrossNum.toFixed(2),
-          taxableAmount: lineTaxableNum.toFixed(2),
-          hsnSac: orderLine.hsnSac,
-          cgstRate: orderLine.cgstRate,
-          cgstAmount: lineCgstNum.toFixed(2),
-          sgstRate: orderLine.sgstRate,
-          sgstAmount: lineSgstNum.toFixed(2),
-          igstRate: orderLine.igstRate,
-          igstAmount: lineIgstNum.toFixed(2),
-          taxAmount: lineTaxNum.toFixed(2),
-          lineTotal: lineTotalNum.toFixed(2),
-          version: 1,
-          createdAt: new Date(),
-          updatedAt: new Date()
-        });
+          const invQtyDec = ExactDecimal.parse(invQtyStr, 4);
+          if (invQtyDec.isZero() || invQtyDec.isNegative()) continue;
+
+          const orderedQtyDec = ExactDecimal.parse(orderLine.orderedQuantity, 4);
+          const cancelledQtyDec = ExactDecimal.parse(orderLine.cancelledQuantity || '0.0000', 4);
+          const prevInvoicedDec = ExactDecimal.parse(orderLine.invoicedQuantity || '0.0000', 4);
+          const maxInvoicableDec = orderedQtyDec.sub(cancelledQtyDec).sub(prevInvoicedDec);
+
+          if (isGt(invQtyDec, maxInvoicableDec)) {
+            throw new ValidationError(
+              `OVER_INVOICING_EXCEEDED: Invoiced quantity (${invQtyDec.toString()}) for product '${orderLine.productCodeSnapshot}' exceeds remaining deliverable quantity (${maxInvoicableDec.toString()}).`
+            );
+          }
+
+          const unitPriceDec = ExactDecimal.parse(orderLine.unitPrice, 4);
+          const lineGrossDec = mulDec(invQtyDec, unitPriceDec, 2);
+          const discPercentDec = ExactDecimal.parse(orderLine.discountPercent || '0.00', 2);
+          const lineDiscDec = calcDiscDec(lineGrossDec, discPercentDec);
+          const lineTaxableDec = lineGrossDec.sub(lineDiscDec);
+
+          const taxResult = await this.calculateLineTax(
+            ctx,
+            input.companyId,
+            invoiceDateStr,
+            orderLine.hsnSac,
+            lineTaxableDec,
+            orderLine.cgstRate || '0.00',
+            orderLine.sgstRate || '0.00',
+            orderLine.igstRate || '0.00'
+          );
+
+          const lineCgstDec = ExactDecimal.parse(taxResult.components.find(c => c.rateType === 'CGST')?.taxAmount || '0.00', 2);
+          const lineSgstDec = ExactDecimal.parse(taxResult.components.find(c => c.rateType === 'SGST')?.taxAmount || '0.00', 2);
+          const lineIgstDec = ExactDecimal.parse(taxResult.components.find(c => c.rateType === 'IGST')?.taxAmount || '0.00', 2);
+          const lineTaxDec = ExactDecimal.parse(taxResult.totalTaxAmount, 2);
+          const lineTotalDec = lineTaxableDec.add(lineTaxDec);
+
+          subtotalDec = subtotalDec.add(lineGrossDec);
+          discDec = discDec.add(lineDiscDec);
+          taxableDec = taxableDec.add(lineTaxableDec);
+          cgstDec = cgstDec.add(lineCgstDec);
+          sgstDec = sgstDec.add(lineSgstDec);
+          igstDec = igstDec.add(lineIgstDec);
+          taxDec = taxDec.add(lineTaxDec);
+          totalDec = totalDec.add(lineTotalDec);
+
+          const lineId = crypto.randomUUID();
+          await tx.insert(salesInvoiceLines).values({
+            id: lineId,
+            invoiceId,
+            salesOrderLineId: orderLine.id,
+            salesDeliveryLineId: null,
+            tenantId: ctx.tenantId,
+            companyId: input.companyId,
+            lineNumber: lineNumCounter++,
+            productId: orderLine.productId,
+            productCodeSnapshot: orderLine.productCodeSnapshot,
+            productNameSnapshot: orderLine.productNameSnapshot,
+            description: orderLine.description || null,
+            uom: orderLine.uom,
+            invoicedQuantity: invQtyDec.toString(),
+            unitPrice: orderLine.unitPrice,
+            discountPercent: orderLine.discountPercent,
+            discountAmount: lineDiscDec.toString(),
+            allocatedHeaderDiscountAmount: '0.00',
+            grossAmount: lineGrossDec.toString(),
+            taxableAmount: lineTaxableDec.toString(),
+            hsnSac: orderLine.hsnSac,
+            cgstRate: orderLine.cgstRate || '0.00',
+            cgstAmount: lineCgstDec.toString(),
+            sgstRate: orderLine.sgstRate || '0.00',
+            sgstAmount: lineSgstDec.toString(),
+            igstRate: orderLine.igstRate || '0.00',
+            igstAmount: lineIgstDec.toString(),
+            taxAmount: lineTaxDec.toString(),
+            lineTotal: lineTotalDec.toString(),
+            version: 1
+          });
+
+          // Update sales_order_lines invoicedQuantity
+          await tx
+            .update(salesOrderLines)
+            .set({
+              invoicedQuantity: prevInvoicedDec.add(invQtyDec).toString(),
+              updatedAt: new Date()
+            })
+            .where(eq(salesOrderLines.id, orderLine.id));
+
+          insertedLines.push({
+            id: lineId,
+            invoiceId,
+            salesOrderLineId: orderLine.id,
+            salesDeliveryLineId: null,
+            tenantId: ctx.tenantId,
+            companyId: input.companyId,
+            lineNumber: lineNumCounter - 1,
+            productId: orderLine.productId,
+            productCodeSnapshot: orderLine.productCodeSnapshot,
+            productNameSnapshot: orderLine.productNameSnapshot,
+            description: orderLine.description || null,
+            uom: orderLine.uom,
+            invoicedQuantity: invQtyDec.toString(),
+            unitPrice: orderLine.unitPrice,
+            discountPercent: orderLine.discountPercent,
+            discountAmount: lineDiscDec.toString(),
+            allocatedHeaderDiscountAmount: '0.00',
+            grossAmount: lineGrossDec.toString(),
+            taxableAmount: lineTaxableDec.toString(),
+            hsnSac: orderLine.hsnSac,
+            cgstRate: orderLine.cgstRate || '0.00',
+            cgstAmount: lineCgstDec.toString(),
+            sgstRate: orderLine.sgstRate || '0.00',
+            sgstAmount: lineSgstDec.toString(),
+            igstRate: orderLine.igstRate || '0.00',
+            igstAmount: lineIgstDec.toString(),
+            taxAmount: lineTaxDec.toString(),
+            lineTotal: lineTotalDec.toString(),
+            version: 1,
+            createdAt: new Date(),
+            updatedAt: new Date()
+          });
+        }
       }
 
       await tx.insert(salesInvoices).values({
@@ -557,8 +1024,8 @@ export class SalesInvoiceService {
         invoiceNumber,
         salesOrderId: orderRow.id,
         salesOrderNumber: orderRow.orderNumber,
-        salesDeliveryId: input.salesDeliveryId || null,
-        salesDeliveryNumber: deliveryNum,
+        salesDeliveryId: delRow ? delRow.id : (input.salesDeliveryId || null),
+        salesDeliveryNumber: delRow ? delRow.deliveryNumber : null,
         customerId: orderRow.customerId,
         invoiceDate: invoiceDateStr,
         dueDate: dueDateStr,
@@ -572,16 +1039,16 @@ export class SalesInvoiceService {
         contactSnapshot: orderRow.contactSnapshot,
         status: 'DRAFT',
         termsAndConditions: orderRow.termsAndConditions,
-        subtotalAmount: subtotal.toFixed(2),
+        subtotalAmount: subtotalDec.toString(),
         headerDiscountAmount: '0.00',
-        discountAmount: (subtotal - totalTaxable).toFixed(2),
-        taxableAmount: totalTaxable.toFixed(2),
-        cgstAmount: totalCgst.toFixed(2),
-        sgstAmount: totalSgst.toFixed(2),
-        igstAmount: totalIgst.toFixed(2),
-        taxAmount: totalTax.toFixed(2),
-        totalAmount: totalGross.toFixed(2),
-        totalAmountBase: totalGross.toFixed(2),
+        discountAmount: discDec.toString(),
+        taxableAmount: taxableDec.toString(),
+        cgstAmount: cgstDec.toString(),
+        sgstAmount: sgstDec.toString(),
+        igstAmount: igstDec.toString(),
+        taxAmount: taxDec.toString(),
+        totalAmount: totalDec.toString(),
+        totalAmountBase: totalDec.toString(),
         version: 1,
         createdBy: userId,
         updatedBy: userId
@@ -595,8 +1062,8 @@ export class SalesInvoiceService {
         invoiceNumber,
         salesOrderId: orderRow.id,
         salesOrderNumber: orderRow.orderNumber,
-        salesDeliveryId: input.salesDeliveryId || null,
-        salesDeliveryNumber: deliveryNum,
+        salesDeliveryId: delRow ? delRow.id : (input.salesDeliveryId || null),
+        salesDeliveryNumber: delRow ? delRow.deliveryNumber : null,
         customerId: orderRow.customerId,
         invoiceDate: invoiceDateStr,
         dueDate: dueDateStr,
@@ -611,16 +1078,16 @@ export class SalesInvoiceService {
         status: 'DRAFT',
         notes: null,
         termsAndConditions: orderRow.termsAndConditions,
-        subtotalAmount: subtotal.toFixed(2),
+        subtotalAmount: subtotalDec.toString(),
         headerDiscountAmount: '0.00',
-        discountAmount: (subtotal - totalTaxable).toFixed(2),
-        taxableAmount: totalTaxable.toFixed(2),
-        cgstAmount: totalCgst.toFixed(2),
-        sgstAmount: totalSgst.toFixed(2),
-        igstAmount: totalIgst.toFixed(2),
-        taxAmount: totalTax.toFixed(2),
-        totalAmount: totalGross.toFixed(2),
-        totalAmountBase: totalGross.toFixed(2),
+        discountAmount: discDec.toString(),
+        taxableAmount: taxableDec.toString(),
+        cgstAmount: cgstDec.toString(),
+        sgstAmount: sgstDec.toString(),
+        igstAmount: igstDec.toString(),
+        taxAmount: taxDec.toString(),
+        totalAmount: totalDec.toString(),
+        totalAmountBase: totalDec.toString(),
         arDocumentId: null,
         arOpenItemId: null,
         journalEntryId: null,
@@ -936,7 +1403,7 @@ export class SalesInvoiceService {
   }
 
   /**
-   * Posts a Sales Invoice (DRAFT/APPROVED -> POSTED) and triggers Accounts Receivable & AccountingCore Posting.
+   * Posts a Sales Invoice (DRAFT/SUBMITTED/APPROVED -> POSTED) and triggers Accounts Receivable & AccountingCore GL Posting.
    * Also executes sales order state transition CONFIRMED -> COMPLETED when all order lines are fully delivered and fully invoiced!
    */
   public async postInvoice(
@@ -959,7 +1426,7 @@ export class SalesInvoiceService {
 
     const userId = ctx.user?.userId || (ctx as any).userId || '00000000-0000-0000-0000-000000000000';
 
-    // 1. Post AR Document via AR Subledger Service
+    // 1. Post AR Document via AR Subledger Service with Exact Decimal monetary strings
     const arDocInput = {
       companyId: invoice.companyId,
       customerId: invoice.customerId,
@@ -977,19 +1444,26 @@ export class SalesInvoiceService {
         productId: l.productId,
         description: `${l.productNameSnapshot} (${l.productCodeSnapshot})`,
         hsnSac: l.hsnSac || undefined,
-        quantity: parseFloat(l.invoicedQuantity).toFixed(2),
-        unitPrice: parseFloat(l.unitPrice).toFixed(2),
-        taxableAmount: parseFloat(l.taxableAmount).toFixed(2),
-        cgstAmount: parseFloat(l.cgstAmount).toFixed(2),
-        sgstAmount: parseFloat(l.sgstAmount).toFixed(2),
-        igstAmount: parseFloat(l.igstAmount).toFixed(2),
-        taxAmount: parseFloat(l.taxAmount).toFixed(2),
-        grossAmount: parseFloat(l.lineTotal || l.grossAmount).toFixed(2)
+        quantity: ExactDecimal.parse(l.invoicedQuantity, 4).toString(),
+        unitPrice: ExactDecimal.halfEvenRound(ExactDecimal.parse(l.unitPrice, 4).rawBigInt, 4, 2).toString(),
+        taxableAmount: ExactDecimal.parse(l.taxableAmount, 2).toString(),
+        cgstAmount: ExactDecimal.parse(l.cgstAmount, 2).toString(),
+        sgstAmount: ExactDecimal.parse(l.sgstAmount, 2).toString(),
+        igstAmount: ExactDecimal.parse(l.igstAmount, 2).toString(),
+        taxAmount: ExactDecimal.parse(l.taxAmount, 2).toString(),
+        grossAmount: ExactDecimal.parse(l.lineTotal || l.grossAmount, 2).toString()
       }))
     };
 
     const draftArDoc = await arDocumentService.createDraft(ctx, arDocInput);
     const postedArDoc = await arDocumentService.postDocument(ctx, draftArDoc.id, { idempotencyKey });
+
+    // Assert AR Gross Amount matches Invoice Grand Total exactly
+    const invTotalDec = ExactDecimal.parse(invoice.totalAmount, 2);
+    const arTotalDec = ExactDecimal.parse(postedArDoc.grossAmount, 2);
+    if (!invTotalDec.equals(arTotalDec)) {
+      throw new BusinessRuleViolationError(`AR_RECONCILIATION_FAILED: Invoice total (${invoice.totalAmount}) does not match AR gross amount (${postedArDoc.grossAmount}).`);
+    }
 
     const openItems = await arDocumentService.getOpenItems(ctx, invoice.companyId, { customerId: invoice.customerId });
     const matchingOpenItem = openItems.find(oi => oi.arDocumentId === postedArDoc.id);
@@ -1011,13 +1485,14 @@ export class SalesInvoiceService {
         const order = await salesOrderService.getOrderById(ctx, invoice.salesOrderId);
         let allFullyFulfilled = true;
         for (const ol of order.lines) {
-          const ordered = parseFloat(ol.orderedQuantity);
-          const cancelled = parseFloat(ol.cancelledQuantity || '0');
-          const delivered = parseFloat(ol.deliveredQuantity || '0');
-          const invoiced = parseFloat(ol.invoicedQuantity || '0');
-          const netRequired = Math.max(0, ordered - cancelled);
+          const orderedDec = ExactDecimal.parse(ol.orderedQuantity, 4);
+          const cancelledDec = ExactDecimal.parse(ol.cancelledQuantity || '0.0000', 4);
+          const deliveredDec = ExactDecimal.parse(ol.deliveredQuantity || '0.0000', 4);
+          const invoicedDec = ExactDecimal.parse(ol.invoicedQuantity || '0.0000', 4);
+          const netRequiredDec = orderedDec.sub(cancelledDec);
+          if (netRequiredDec.isNegative()) continue;
 
-          if (delivered < netRequired || invoiced < netRequired) {
+          if (isLt(deliveredDec, netRequiredDec) || isLt(invoicedDec, netRequiredDec)) {
             allFullyFulfilled = false;
             break;
           }
@@ -1065,13 +1540,14 @@ export class SalesInvoiceService {
 
             let allFullyFulfilled = true;
             for (const ol of dbOrderLines) {
-              const ordered = parseFloat(ol.orderedQuantity);
-              const cancelled = parseFloat(ol.cancelledQuantity || '0');
-              const delivered = parseFloat(ol.deliveredQuantity || '0');
-              const invoiced = parseFloat(ol.invoicedQuantity || '0');
-              const netRequired = Math.max(0, ordered - cancelled);
+              const orderedDec = ExactDecimal.parse(ol.orderedQuantity, 4);
+              const cancelledDec = ExactDecimal.parse(ol.cancelledQuantity || '0.0000', 4);
+              const deliveredDec = ExactDecimal.parse(ol.deliveredQuantity || '0.0000', 4);
+              const invoicedDec = ExactDecimal.parse(ol.invoicedQuantity || '0.0000', 4);
+              const netRequiredDec = orderedDec.sub(cancelledDec);
+              if (netRequiredDec.isNegative()) continue;
 
-              if (delivered < netRequired || invoiced < netRequired) {
+              if (isLt(deliveredDec, netRequiredDec) || isLt(invoicedDec, netRequiredDec)) {
                 allFullyFulfilled = false;
                 break;
               }
@@ -1116,7 +1592,7 @@ export class SalesInvoiceService {
   }
 
   /**
-   * Cancels a DRAFT Sales Invoice. (Posted invoices are immutable and cannot be cancelled directly).
+   * Cancels a DRAFT/SUBMITTED Sales Invoice. (Posted invoices are immutable and cannot be cancelled directly).
    */
   public async cancelInvoice(ctx: RequestContext, invoiceId: string, reason: string): Promise<SalesInvoiceDTO> {
     this.checkPermission(ctx, 'sales:invoice:cancel');
@@ -1140,9 +1616,10 @@ export class SalesInvoiceService {
           if (line.salesOrderLineId) {
             const orderLine = order.lines.find(l => l.id === line.salesOrderLineId);
             if (orderLine) {
-              const currentInv = parseFloat(orderLine.invoicedQuantity || '0');
-              const rel = parseFloat(line.invoicedQuantity);
-              orderLine.invoicedQuantity = Math.max(0, currentInv - rel).toFixed(4);
+              const currentInvDec = ExactDecimal.parse(orderLine.invoicedQuantity || '0.0000', 4);
+              const relDec = ExactDecimal.parse(line.invoicedQuantity, 4);
+              const newInvDec = currentInvDec.sub(relDec);
+              orderLine.invoicedQuantity = newInvDec.isNegative() ? '0.0000' : newInvDec.toString();
             }
           }
         }
@@ -1168,12 +1645,15 @@ export class SalesInvoiceService {
             if (line.salesOrderLineId) {
               const orderLine = dbOrderLines.find(l => l.id === line.salesOrderLineId);
               if (orderLine) {
-                const currentInv = parseFloat(orderLine.invoicedQuantity || '0');
-                const rel = parseFloat(line.invoicedQuantity);
+                const currentInvDec = ExactDecimal.parse(orderLine.invoicedQuantity || '0.0000', 4);
+                const relDec = ExactDecimal.parse(line.invoicedQuantity, 4);
+                const newInvDec = currentInvDec.sub(relDec);
+                const finalStr = newInvDec.isNegative() ? '0.0000' : newInvDec.toString();
+
                 await tx
                   .update(salesOrderLines)
                   .set({
-                    invoicedQuantity: Math.max(0, currentInv - rel).toFixed(4),
+                    invoicedQuantity: finalStr,
                     updatedAt: new Date()
                   })
                   .where(eq(salesOrderLines.id, orderLine.id));

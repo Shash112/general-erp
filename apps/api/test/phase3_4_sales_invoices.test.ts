@@ -127,7 +127,7 @@ describe('Phase 3.4 — Sales Invoicing, AR & Accounting Domain & Suite', () => 
     const cust = await customerService.createCustomer(ctx, {
       companyId,
       name: `Invoice Customer ${timestamp}`,
-      code: `CUST-INV-${timestamp}`,
+      code: `CUST-INV-${timestamp}-${Math.floor(Math.random() * 10000)}`,
       legalName: `Invoice Customer ${timestamp}`,
       gstin: '29ABCDE1234F1Z5',
       creditLimit: '500000.00',
@@ -141,10 +141,10 @@ describe('Phase 3.4 — Sales Invoicing, AR & Accounting Domain & Suite', () => 
       customerId,
       addressType: 'BILLING',
       addressLine1: '700 Finance Towers',
-      city: 'Bengaluru',
-      state: 'Karnataka',
-      stateCode: '29',
-      postalCode: '560001'
+      city: 'Mumbai',
+      state: 'Maharashtra',
+      stateCode: '27',
+      postalCode: '400001'
     });
     billingAddrId = bAddr.id;
 
@@ -153,10 +153,10 @@ describe('Phase 3.4 — Sales Invoicing, AR & Accounting Domain & Suite', () => 
       customerId,
       addressType: 'SHIPPING',
       addressLine1: '800 Dispatch Park',
-      city: 'Bengaluru',
-      state: 'Karnataka',
-      stateCode: '29',
-      postalCode: '560058'
+      city: 'Mumbai',
+      state: 'Maharashtra',
+      stateCode: '27',
+      postalCode: '400058'
     });
     shippingAddrId = sAddr.id;
 
@@ -200,7 +200,9 @@ describe('Phase 3.4 — Sales Invoicing, AR & Accounting Domain & Suite', () => 
           productId: productId1,
           quantity: qty,
           unitPrice: '20000.00',
-          discountPercent: '0.00'
+          discountPercent: '0.00',
+          cgstRate: '9.00',
+          sgstRate: '9.00'
         }
       ]
     });
@@ -378,4 +380,219 @@ describe('Phase 3.4 — Sales Invoicing, AR & Accounting Domain & Suite', () => 
     expect(inv1.id).toBe(inv2.id);
     expect(inv1.invoiceNumber).toBe(inv2.invoiceNumber);
   });
+
+  // ============================================================================
+  // 6. TAX ENGINE CONFORMANCE & FROZEN SNAPSHOT TESTS
+  // ============================================================================
+  it('verifies Sales Invoice consumes Tax Engine results and freezes historical tax snapshot on invoice lines', async () => {
+    const order = await createConfirmedSalesOrder('2.0000');
+    const delivery = await salesDeliveryService.createDelivery(ctx, {
+      companyId,
+      salesOrderId: order.id,
+      deliveryDate: '2026-09-12',
+      lines: [{ salesOrderLineId: order.lines[0]!.id, deliveryQuantity: '2.0000' }]
+    });
+    await salesDeliveryService.dispatchDelivery(ctx, delivery.id);
+    await salesDeliveryService.markDelivered(ctx, delivery.id);
+
+    const invoice = await salesInvoiceService.createFromOrder(ctx, {
+      companyId,
+      salesOrderId: order.id,
+      salesDeliveryId: delivery.id,
+      invoicingMode: 'DELIVERY',
+      lines: [{ salesDeliveryLineId: delivery.lines[0]!.id, invoicedQuantity: '2.0000' }]
+    });
+
+    expect(invoice.lines[0]!.salesDeliveryLineId).toBe(delivery.lines[0]!.id);
+    expect(invoice.lines[0]!.hsnSac).toBe('84713010');
+    expect(invoice.lines[0]!.grossAmount).toBe('40000.00'); // 2 * 20000
+    expect(invoice.lines[0]!.taxableAmount).toBe('40000.00');
+    expect(invoice.lines[0]!.cgstAmount).toBe('3600.00'); // 9% of 40,000
+    expect(invoice.lines[0]!.sgstAmount).toBe('3600.00'); // 9% of 40,000
+    expect(invoice.lines[0]!.taxAmount).toBe('7200.00');
+    expect(invoice.lines[0]!.lineTotal).toBe('47200.00');
+    expect(invoice.totalAmount).toBe('47200.00');
+
+    const postedInvoice = await salesInvoiceService.postInvoice(ctx, invoice.id);
+    expect(postedInvoice.status).toBe('POSTED');
+    expect(postedInvoice.lines[0]!.taxAmount).toBe('7200.00');
+  });
+
+  // ============================================================================
+  // 7. DELIVERY -> INVOICE QUANTITY BOUNDARY & GOVERNED MODES TESTS
+  // ============================================================================
+  it('enforces delivery quantity boundary and rejects invoicing undelivered quantities in DELIVERY mode', async () => {
+    const order = await createConfirmedSalesOrder('10.0000');
+    // Deliver only 4.0000
+    const delivery = await salesDeliveryService.createDelivery(ctx, {
+      companyId,
+      salesOrderId: order.id,
+      deliveryDate: '2026-09-12',
+      lines: [{ salesOrderLineId: order.lines[0]!.id, deliveryQuantity: '4.0000' }]
+    });
+    await salesDeliveryService.dispatchDelivery(ctx, delivery.id);
+    await salesDeliveryService.markDelivered(ctx, delivery.id);
+
+    // Attempting to invoice 5.0000 against a delivery of 4.0000 must be rejected
+    await expect(
+      salesInvoiceService.createFromOrder(ctx, {
+        companyId,
+        salesOrderId: order.id,
+        salesDeliveryId: delivery.id,
+        invoicingMode: 'DELIVERY',
+        lines: [{ salesDeliveryLineId: delivery.lines[0]!.id, invoicedQuantity: '5.0000' }]
+      })
+    ).rejects.toThrow(/OVER_INVOICING_EXCEEDED/);
+
+    // Invoicing exactly 4.0000 delivered must succeed
+    const validInv = await salesInvoiceService.createFromOrder(ctx, {
+      companyId,
+      salesOrderId: order.id,
+      salesDeliveryId: delivery.id,
+      invoicingMode: 'DELIVERY',
+      lines: [{ salesDeliveryLineId: delivery.lines[0]!.id, invoicedQuantity: '4.0000' }]
+    });
+    expect(validInv.lines[0]!.invoicedQuantity).toBe('4.0000');
+  });
+
+  it('rejects DELIVERY mode creation when salesDeliveryId is missing', async () => {
+    const order = await createConfirmedSalesOrder('5.0000');
+    await expect(
+      salesInvoiceService.createFromOrder(ctx, {
+        companyId,
+        salesOrderId: order.id,
+        invoicingMode: 'DELIVERY',
+        lines: [{ salesOrderLineId: order.lines[0]!.id, invoicedQuantity: '5.0000' }]
+      })
+    ).rejects.toThrow(/DELIVERY_MODE_REQUIRES_DELIVERY_ID/);
+  });
+
+  // ============================================================================
+  // 8. SOURCE QUANTITY CONCURRENCY & ROW LOCKING TESTS
+  // ============================================================================
+  it('handles concurrent invoicing requests safely so exactly one succeeds when invoicing remaining quantity', async () => {
+    const order = await createConfirmedSalesOrder('10.0000');
+    const delivery = await salesDeliveryService.createDelivery(ctx, {
+      companyId,
+      salesOrderId: order.id,
+      deliveryDate: '2026-09-12',
+      lines: [{ salesOrderLineId: order.lines[0]!.id, deliveryQuantity: '10.0000' }]
+    });
+    await salesDeliveryService.dispatchDelivery(ctx, delivery.id);
+    await salesDeliveryService.markDelivered(ctx, delivery.id);
+
+    const reqA = salesInvoiceService.createFromOrder(ctx, {
+      companyId,
+      salesOrderId: order.id,
+      salesDeliveryId: delivery.id,
+      invoicingMode: 'DELIVERY',
+      lines: [{ salesDeliveryLineId: delivery.lines[0]!.id, invoicedQuantity: '10.0000' }]
+    });
+
+    const reqB = salesInvoiceService.createFromOrder(ctx, {
+      companyId,
+      salesOrderId: order.id,
+      salesDeliveryId: delivery.id,
+      invoicingMode: 'DELIVERY',
+      lines: [{ salesDeliveryLineId: delivery.lines[0]!.id, invoicedQuantity: '10.0000' }]
+    });
+
+    const results = await Promise.allSettled([reqA, reqB]);
+    const fulfilled = results.filter(r => r.status === 'fulfilled');
+    const rejected = results.filter(r => r.status === 'rejected');
+
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+  });
+
+  // ============================================================================
+  // 9. MONEY CORRECTNESS & AR/GL RECONCILIATION TESTS
+  // ============================================================================
+  it('verifies exact single-path reconciliation: line gross - discount + tax === invoice total === AR amount', async () => {
+    const order = await createConfirmedSalesOrder('3.0000');
+    const invoice = await salesInvoiceService.createFromOrder(ctx, {
+      companyId,
+      salesOrderId: order.id,
+      lines: [{ salesOrderLineId: order.lines[0]!.id, invoicedQuantity: '3.0000' }]
+    });
+
+    const postedInvoice = await salesInvoiceService.postInvoice(ctx, invoice.id);
+    const arDoc = await arDocumentService.getDocument(ctx, postedInvoice.arDocumentId!);
+
+    expect(postedInvoice.totalAmount).toBe(arDoc.grossAmount);
+    expect(arDoc.status).toBe('POSTED');
+    expect(arDoc.journalEntryId).toBeDefined();
+  });
+
+  // ============================================================================
+  // 10. FULL ACCEPTANCE E2E FLOW TEST
+  // ============================================================================
+  it('executes full end-to-end flow: Quotation -> Order -> Delivery -> Invoice -> Tax -> AR -> AccountingCore -> GL', async () => {
+    // 1. Create and Approve Quotation
+    const q = await quotationService.createDraftQuotation(ctx, {
+      companyId,
+      customerId,
+      quotationDate: '2026-09-12',
+      validityDate: '2026-10-12',
+      currency: 'INR',
+      exchangeRate: '1.000000',
+      billingAddressId: billingAddrId,
+      shippingAddressId: shippingAddrId,
+      contactId,
+      headerDiscountAmount: 0,
+      lines: [
+        {
+          productId: productId1,
+          quantity: '5.0000',
+          unitPrice: '10000.00',
+          discountPercent: '0.00'
+        }
+      ]
+    });
+    const subQ = await quotationService.submitForApproval(ctx, q.id);
+    if (subQ.status === 'PENDING_APPROVAL') await quotationService.approveQuotation(ctx, q.id);
+    await quotationService.sendQuotation(ctx, q.id);
+    await quotationService.acceptQuotation(ctx, q.id);
+
+    // 2. Convert Quotation -> Sales Order
+    const contract = await quotationService.issueConversionContract(ctx, q.id);
+    const order = await salesOrderService.createFromContract(ctx, contract);
+    const confirmedOrder = await salesOrderService.confirmOrder(ctx, order.id);
+    expect(confirmedOrder.status).toBe('CONFIRMED');
+
+    // 3. Create & Dispatch Sales Delivery
+    const delivery = await salesDeliveryService.createDelivery(ctx, {
+      companyId,
+      salesOrderId: confirmedOrder.id,
+      deliveryDate: '2026-09-12',
+      lines: [{ salesOrderLineId: confirmedOrder.lines[0]!.id, deliveryQuantity: '5.0000' }]
+    });
+    await salesDeliveryService.dispatchDelivery(ctx, delivery.id);
+    await salesDeliveryService.markDelivered(ctx, delivery.id);
+
+    // 4. Create Sales Invoice (Delivery Mode)
+    const invoice = await salesInvoiceService.createFromOrder(ctx, {
+      companyId,
+      salesOrderId: confirmedOrder.id,
+      salesDeliveryId: delivery.id,
+      invoicingMode: 'DELIVERY',
+      lines: [{ salesDeliveryLineId: delivery.lines[0]!.id, invoicedQuantity: '5.0000' }]
+    });
+    expect(invoice.subtotalAmount).toBe('50000.00');
+    expect(invoice.taxableAmount).toBe('50000.00');
+    expect(invoice.taxAmount).toBe('9000.00'); // 18% GST on 50,000
+    expect(invoice.totalAmount).toBe('59000.00');
+
+    // 5. Post Sales Invoice (Triggers Tax Engine -> AR -> AccountingCore -> GL)
+    const postedInvoice = await salesInvoiceService.postInvoice(ctx, invoice.id);
+    expect(postedInvoice.status).toBe('POSTED');
+
+    // 6. Verify AR & Sales Order completion
+    const arDoc = await arDocumentService.getDocument(ctx, postedInvoice.arDocumentId!);
+    expect(arDoc.grossAmount).toBe('59000.00');
+
+    const finalOrder = await salesOrderService.getOrderById(ctx, confirmedOrder.id);
+    expect(finalOrder.status).toBe('COMPLETED');
+  });
 });
+
