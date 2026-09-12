@@ -33,6 +33,7 @@ export interface CreateCreditNoteLineInput {
   originalInvoiceLineId: string;
   salesReturnLineId?: string | null;
   returnedQuantity: string;
+  creditAmount?: string | null;
 }
 
 export interface CreateCreditNoteInput {

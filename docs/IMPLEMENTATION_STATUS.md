@@ -121,13 +121,14 @@ This file tracks actual implementation progress. Do not mark a capability comple
 - Phase 3.2 Architecture Review Notes: `docs/PHASE_3_2_ARCHITECTURE_REVIEW_NOTES.md` (Complete)
 - Phase 3.4 Implementation Report: `docs/PHASE_3_4_IMPLEMENTATION_REPORT.md` (Complete & Verified)
 - Phase 3.5 Implementation Report: `docs/PHASE_3_5_IMPLEMENTATION_REPORT.md` (Complete & Verified)
+- Phase 3.6 Implementation Report: `docs/PHASE_3_6_IMPLEMENTATION_REPORT.md` (Complete & Verified)
 - [x] Phase 3.0 — Shared Commercial Foundation: **COMPLETE / APPROVED**
 - [x] Phase 3.1 — Sales Foundation & Quotations: **COMPLETE / APPROVED**
 - [x] Phase 3.2 — Sales Orders: **COMPLETE / APPROVED**
 - [x] Phase 3.3 — Sales Delivery: **COMPLETE / APPROVED**
 - [x] Phase 3.4 — Sales Invoicing + AR + Accounting: **COMPLETE / HARDENED & VERIFIED**
 - [x] Phase 3.5 — Sales Returns / Credit Notes: **COMPLETE & VERIFIED**
-- [ ] Phase 3.6 — Procurement Foundation & Purchase Requests
+- [x] Phase 3.6 — Procurement Foundation & Purchase Requests: **COMPLETE & VERIFIED**
 - [ ] Phase 3.7 — Purchase Orders & Goods Receipt
 - [ ] Phase 3.8 — Supplier Billing + AP + Accounting
 - [ ] Phase 3.9 — Procurement Returns
