@@ -2,28 +2,55 @@
 
 ## 1. How the agent should work
 
-This repository is being built by an AI coding agent inside Antigravity. The agent must behave like a senior product engineer and ERP domain engineer, not like a code generator.
+This repository is being built by an AI coding agent. The agent must behave like a senior product engineer and ERP domain engineer, not like a code generator.
 
 The agent should optimize for correctness, maintainability, auditability, and incremental delivery.
 
-### Required loop
+### Required workflow
 
-`Understand -> Inspect -> Plan -> Implement -> Test -> Review -> Document -> Report`
+`Understand -> Inspect -> Read Master Plan -> Implement Slice -> Test -> Review -> Document -> Report`
 
 Never skip inspection of existing code before adding a parallel implementation.
 
-### Phase Progression Rule
+### Master Architecture Rule
 
-**Never automatically proceed from one phase to another.**
+The remaining architecture is planned once in:
 
-Every phase must end with:
+`docs/MASTER_REMAINING_ARCHITECTURE_AND_IMPLEMENTATION_PLAN.md`
+
+The agent must use that document as the roadmap and should **not require a new architecture plan for every phase or item**.
+
+Implementation is intentionally separated from architecture planning:
 
 ```text
-PHASE X COMPLETE — WAITING FOR EXPLICIT APPROVAL
+MASTER ARCHITECTURE
+        ↓
+IMPLEMENTATION SLICE
+        ↓
+VERIFY
+        ↓
+STATUS / REPORT
+        ↓
+NEXT SLICE
 ```
 
-The next phase may begin only after an explicit user instruction.
+A concise implementation plan for the current slice is still required before coding, but it must be derived from the master plan rather than recreating architecture decisions.
 
+### Architecture Change Gate
+
+Reopen architecture only when implementation discovers a material conflict involving:
+
+- financial correctness;
+- legal/statutory correctness;
+- security or tenant/company data isolation;
+- data integrity;
+- migration compatibility;
+- a broken cross-domain contract;
+- unavoidable scope change.
+
+For such a conflict, document/update an ADR in `docs/DECISIONS.md`, amend the master plan, then continue. Minor implementation choices, refactors and UX refinements do not reopen architecture.
+
+There is **no mandatory `PHASE X COMPLETE — WAITING FOR EXPLICIT APPROVAL` gate** between implementation slices. After verification, update status/reporting and stop for the next explicit implementation instruction.
 
 ## 2. Repository authority
 
@@ -40,85 +67,47 @@ This file contains non-negotiable engineering and architectural rules.
 ### Architecture decisions
 `docs/DECISIONS.md`
 
-Record important choices, especially when the PRS leaves multiple valid implementations.
+Record important choices, especially material choices when the PRS or master plan leaves multiple valid implementations.
+
+### Master remaining plan
+`docs/MASTER_REMAINING_ARCHITECTURE_AND_IMPLEMENTATION_PLAN.md`
+
+This is the authoritative architecture and implementation roadmap for remaining work.
 
 ### Progress
 `docs/IMPLEMENTATION_STATUS.md`
 
 Keep this aligned with actual code, not intended code.
 
-## 3. Recommended implementation order
+## 3. Implementation roadmap
 
-Do not start by implementing screens randomly. Build vertical foundations first.
+Do not use the old phase-by-phase planning gate. Follow the ordered roadmap in the master plan.
 
-### Phase 0 — Engineering foundation
-- repository/workspace
-- TypeScript strictness
-- lint/format/test
-- environment/config system
-- database connection
-- migrations
-- logging/observability
-- API conventions
-- error model
-- authentication foundation
-- authorization/policy foundation
-- audit foundation
-- health/readiness checks
+At the current baseline, the major sequence is:
 
-### Phase 1 — Platform engines
-- organization/master data
-- numbering/sequences
-- configuration/custom fields/forms
-- rules
-- workflow/approvals
-- document lifecycle
-- notifications
-- file/document storage
-- jobs/queues
+1. Shared platform completion where required by the next slice.
+2. Sales Delivery.
+3. Sales Invoicing + AR + Accounting.
+4. Sales Returns.
+5. Purchase Requests.
+6. Purchase Orders + GRN.
+7. Supplier Billing + AP + three-way matching.
+8. Procurement Returns.
+9. Commercial Reporting / UX.
+10. Full Commercial Verification.
+11. Inventory / Warehouse.
+12. CRM.
+13. HR / Attendance / Leave / Payroll.
+14. Projects / Timesheets / Costing.
+15. Expenses.
+16. Fixed Assets.
+17. Search / Reporting / Import-Export completion.
+18. Dashboards / Analytics / Budgeting.
+19. GST / E-Invoice / E-Way / Banking integrations.
+20. Webhooks / Privacy / Backup / Upgrade / Templates.
+21. AI V1, then V2, then V3 / governed agents.
 
-### Phase 2 — Financial and operational core
-- chart of accounts
-- journal/accounting engine
-- fiscal periods
-- tax engine
-- AR/AP
-- products/UOM
-- warehouses/inventory movements
-
-### Phase 3 — Sales and procurement
-- customers/suppliers
-- CRM
-- quotations
-- sales orders
-- delivery
-- invoices
-- purchase requisitions
-- RFQs
-- supplier quotations
-- purchase orders
-- GRN
-- purchase invoices
-- three-way matching
-
-### Phase 4 — People, projects, assets, expenses
-Implement only after shared platform and financial primitives are stable.
-
-### Phase 5 — Reporting, analytics, integrations
-- reporting/query engine
-- dashboards
-- imports/exports
-- banking integrations
-- GST/e-invoice/e-way integrations
-- webhooks
-
-### Phase 6 — AI
-- read-only business Q&A
-- insights
-- governed tool gateway
-- draft actions
-- approval-gated execution
-- agents
+Do not invent a different sequence without identifying a concrete dependency.
 
 ## 4. Vertical slice rule
 
@@ -170,8 +159,10 @@ procurement/
   suppliers
   requisitions
   rfq
+  supplier-quotations
   purchase-orders
   receiving
+  billing
 
 inventory/
   products
@@ -203,6 +194,7 @@ Names may adapt to the final repository, but boundaries must remain explicit.
 - Financial posting must be transactional.
 - Avoid generic JSON blobs for authoritative financial data. JSON/custom-field storage is for genuinely configurable attributes.
 - Effective-dated configuration must support historical correctness.
+- Never edit an already-applied migration; create a new migration.
 
 ## 7. API rules
 
@@ -228,9 +220,9 @@ Do not implement lifecycle fields as arbitrary strings scattered across the code
 
 Define explicit state transitions and guard them through domain/application services.
 
-Examples from the PRS:
+Historical and master-plan examples include:
 - Lead: NEW -> QUALIFIED -> OPPORTUNITY -> QUOTATION -> WON, with DISQUALIFIED/LOST paths.
-- Sales documents: DRAFT -> SUBMITTED -> APPROVAL -> APPROVED -> CONFIRMED -> PARTIALLY FULFILLED -> COMPLETED.
+- Sales quotation/order lifecycles as defined by their accepted architecture documents.
 - Financial correction: POSTED -> CREDIT NOTE / ADJUSTMENT rather than destructive editing.
 
 ## 9. Accounting rules
@@ -313,22 +305,23 @@ AI must have explicit tool schemas, authorization context, input validation, exe
 Use this decision hierarchy:
 
 1. Follow explicit PRS requirement.
-2. Follow locked architectural decision.
-3. Follow existing implemented convention.
-4. Prefer the simpler, reversible design.
-5. Record the decision.
-6. Ask the human if financial, legal, security, migration, or data-loss risk is material.
+2. Follow accepted architectural decision.
+3. Follow the master remaining architecture plan.
+4. Follow existing implemented convention.
+5. Prefer the simpler, reversible design.
+6. Record the decision.
+7. Ask the human if financial, legal, security, migration, or data-loss risk is material.
 
 ## 16. Agent response format
 
 For implementation tasks, respond with:
 
 ### Plan
-- 3–8 concise bullets.
+- 3–8 concise bullets describing the implementation slice only.
 
 ### Changes
 - files/modules changed
-- important design choices
+- important implementation choices
 
 ### Validation
 - commands run
@@ -336,7 +329,7 @@ For implementation tasks, respond with:
 
 ### Risks / follow-ups
 - known limitations
-- decisions requiring human input
-- next recommended task
+- material decisions requiring human input
+- next implementation slice
 
 Do not claim a test passed if it was not actually run.
