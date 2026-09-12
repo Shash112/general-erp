@@ -57,23 +57,47 @@ Audit trails are cryptographically linked and tamper-evident. Any modification t
 Operational documents require sequence allocation (e.g., `INV-2025-26-BLR-0001`) with fiscal year resets and branch scoping.
 
 ### Decision
-Document sequence allocation is handled by the platform `NumberingEngine` (Platform Engine #13) using atomic counters, configurable templates, and padding rules. Naive `SELECT MAX(number) + 1` queries are prohibited.
+Document sequence allocation is handled by the platform `NumberingEngine` using atomic counters, configurable templates, and padding rules. Naive `SELECT MAX(number) + 1` queries are prohibited.
 
 ### Consequences
 Numbering allocation is concurrency-safe, scope-aware, and fiscal-year compliant across all business modules.
 
 ---
 
-## ADR-009 — Mandatory Phase Progression Rules & Verification Gates
+## ADR-009 — Master Architecture + Implementation Slices
 **Status:** Accepted
-**Date:** 2026-09-08
+**Date:** 2026-09-12
+**Supersedes:** ADR-009 (2026-09-08) — Mandatory Phase Progression Rules & Verification Gates
 
 ### Context
-To maintain architecture discipline and avoid premature implementation of business domain features before platform engines are production-ready, phase transitions must be explicitly gated.
+The project previously required a fresh architecture plan and formal approval gate before each phase. This creates unnecessary repeated planning now that the remaining ERP architecture has been reviewed as a single roadmap.
 
 ### Decision
-The AI agent must never automatically proceed from one phase to another. Every phase completion must end with `PHASE X COMPLETE — WAITING FOR EXPLICIT APPROVAL`. The next phase begins only after explicit user instruction following a formal architecture review.
+The remaining architecture is planned once in `docs/MASTER_REMAINING_ARCHITECTURE_AND_IMPLEMENTATION_PLAN.md`.
+
+Future work follows:
+
+```text
+MASTER ARCHITECTURE
+        ↓
+IMPLEMENTATION SLICE
+        ↓
+VERIFY
+        ↓
+STATUS / REPORT
+        ↓
+NEXT SLICE
+```
+
+A concise implementation plan is still produced before each coding slice, but it is derived from the master architecture rather than recreating architecture decisions.
+
+Architecture may be reopened only for material conflicts involving financial/legal correctness, security or data isolation, data integrity, migration compatibility, broken cross-domain contracts, or unavoidable scope changes. Such a change must be recorded as an ADR and reflected in the master plan before implementation continues.
+
+There is no mandatory `PHASE X COMPLETE — WAITING FOR EXPLICIT APPROVAL` gate between implementation slices.
 
 ### Consequences
-All domain modules in Phase 2 through Phase 6 will build upon audited, production-grade platform engine contracts without platform rewrites or architectural churn.
 
+- Architecture decisions are made once and reused across the remaining roadmap.
+- Implementation can proceed incrementally without repeated architecture-review cycles.
+- Verification remains mandatory for every implementation slice.
+- Material architectural discoveries remain explicitly governed and auditable.
