@@ -9,6 +9,7 @@ export * from './schema/sales.js';
 export * from './schema/sales-order.js';
 export * from './schema/sales-delivery.js';
 export * from './schema/sales-invoice.js';
+export * from './schema/sales-return.js';
 export * from './client.js';
 export { eq, and, sql, or, inArray, ilike } from 'drizzle-orm';
 
