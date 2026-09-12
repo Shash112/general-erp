@@ -25,6 +25,7 @@ import { purchaseRequestRoutes } from './routes/purchase-request.routes.js';
 import { sourcingRoutes } from './routes/sourcing.routes.js';
 import { purchaseOrderRoutes } from './routes/purchase-order.routes.js';
 import { goodsReceiptRoutes } from './routes/goods-receipt.routes.js';
+import { supplierBillRoutes } from './routes/supplier-bill.routes.js';
 import { accountingEngine } from './platform/accounting/accounting.service.js';
 
 import { authorizationService } from './platform/authorization/authorization.service.js';
@@ -72,6 +73,7 @@ export function buildApp() {
   app.register(sourcingRoutes);
   app.register(purchaseOrderRoutes);
   app.register(goodsReceiptRoutes);
+  app.register(supplierBillRoutes);
 
 
 

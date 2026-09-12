@@ -118,11 +118,6 @@ export class GoodsReceiptService {
 
     // 3. Generate Sequence Number
     const yearStr = input.receiptDate ? input.receiptDate.substring(0, 4) : new Date().getFullYear().toString();
-    numberingEngine.configureSequence(ctx.tenantId, input.companyId, {
-      documentType: 'GOODS_RECEIPT_NOTE',
-      prefix: 'GRN',
-      sequenceLength: 4,
-    });
     const grnNumber = numberingEngine.generateNextNumber(
       ctx.tenantId,
       input.companyId,

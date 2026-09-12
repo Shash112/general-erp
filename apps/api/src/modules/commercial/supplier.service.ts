@@ -6,6 +6,7 @@ import {
   ConflictError
 } from '@general-erp/core';
 import { auditService } from '../../platform/audit/audit.service.js';
+import { masterDataService } from '../../platform/master-data/master-data.service.js';
 import { getDb, suppliers, NewSupplier, eq, and, sql, ilike, or } from '@general-erp/database';
 
 export interface SupplierDTO {
@@ -216,6 +217,15 @@ export class SupplierService {
       };
 
       this.memoryStore.set(`${ctx.tenantId}:${ctx.companyId}:${id}`, dto);
+      await masterDataService.createSupplier(ctx, {
+        id,
+        companyId: ctx.companyId,
+        name: dto.name,
+        code: dto.code,
+        ...(dto.gstin ? { gstin: dto.gstin } : {}),
+        ...(dto.email ? { email: dto.email } : {}),
+        ...(dto.phone ? { phone: dto.phone } : {}),
+      });
       return dto;
     }
   }

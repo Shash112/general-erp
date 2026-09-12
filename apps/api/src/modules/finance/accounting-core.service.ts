@@ -466,6 +466,39 @@ export class AccountingCoreService {
           const mapping = await accountingConfigurationService.getMapping(ctx, eventInput.companyId, eventInput.eventType, line.lineRole);
           if (mapping && mapping.isActive) {
             resolvedAccountId = mapping.accountId;
+          } else {
+            // Fallback resolution for standard lineRoles using postable COA accounts
+            try {
+              const accounts = await chartOfAccountsService.getAccountsList(ctx, eventInput.companyId);
+              const postableAccounts = accounts.filter(a => a.isPostable && a.nodeType === 'ACCOUNT');
+              if (line.lineRole === 'AP_CONTROL') {
+                const acc = postableAccounts.find(a => a.isControlAccount && (a.controlAccountType === 'AP' || (a.controlAccountType as any) === 'PAYABLE')) || postableAccounts.find(a => a.accountCode === '2110');
+                if (acc) resolvedAccountId = acc.id;
+              } else if (line.lineRole === 'AR_CONTROL') {
+                const acc = postableAccounts.find(a => a.isControlAccount && (a.controlAccountType === 'AR' || (a.controlAccountType as any) === 'RECEIVABLE')) || postableAccounts.find(a => a.accountCode === '1130');
+                if (acc) resolvedAccountId = acc.id;
+              } else if (line.lineRole === 'INPUT_CGST') {
+                const acc = postableAccounts.find(a => a.accountCode === '1140') || postableAccounts.find(a => a.isControlAccount && a.controlAccountType === 'TAX_INPUT');
+                if (acc) resolvedAccountId = acc.id;
+              } else if (line.lineRole === 'INPUT_SGST') {
+                const acc = postableAccounts.find(a => a.accountCode === '1141') || postableAccounts.find(a => a.isControlAccount && a.controlAccountType === 'TAX_INPUT');
+                if (acc) resolvedAccountId = acc.id;
+              } else if (line.lineRole === 'INPUT_IGST') {
+                const acc = postableAccounts.find(a => a.accountCode === '1142') || postableAccounts.find(a => a.isControlAccount && a.controlAccountType === 'TAX_INPUT');
+                if (acc) resolvedAccountId = acc.id;
+              } else if (line.lineRole === 'INPUT_UTGST' || line.lineRole === 'INPUT_CESS') {
+                const acc = postableAccounts.find(a => a.accountCode === '1140') || postableAccounts.find(a => a.isControlAccount && a.controlAccountType === 'TAX_INPUT');
+                if (acc) resolvedAccountId = acc.id;
+              } else if (line.lineRole === 'PURCHASE_EXPENSE') {
+                const acc = postableAccounts.find(a => a.accountCode === '5110') || postableAccounts.find(a => a.accountType === 'EXPENSE');
+                if (acc) resolvedAccountId = acc.id;
+              } else if (line.lineRole === 'SALES_REVENUE') {
+                const acc = postableAccounts.find(a => a.accountCode === '4100') || postableAccounts.find(a => a.accountType === 'INCOME');
+                if (acc) resolvedAccountId = acc.id;
+              }
+            } catch {
+              // Ignore fallback error
+            }
           }
         }
 

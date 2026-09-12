@@ -124,6 +124,7 @@ This file tracks actual implementation progress. Do not mark a capability comple
 - Phase 3.6 Implementation Report: `docs/PHASE_3_6_IMPLEMENTATION_REPORT.md` (Complete & Verified)
 - Phase 3.7 Implementation Report: `docs/PHASE_3_7_IMPLEMENTATION_REPORT.md` (Complete & Verified)
 - Phase 3.8 Implementation Report: `docs/PHASE_3_8_IMPLEMENTATION_REPORT.md` (Complete & Verified)
+- Phase 3.9 Implementation Report: `docs/PHASE_3_9_IMPLEMENTATION_REPORT.md` (Complete & Verified)
 - [x] Phase 3.0 — Shared Commercial Foundation: **COMPLETE / APPROVED**
 - [x] Phase 3.1 — Sales Foundation & Quotations: **COMPLETE / APPROVED**
 - [x] Phase 3.2 — Sales Orders: **COMPLETE / APPROVED**
@@ -133,7 +134,7 @@ This file tracks actual implementation progress. Do not mark a capability comple
 - [x] Phase 3.6 — Procurement Foundation & Purchase Requests: **COMPLETE & VERIFIED**
 - [x] Phase 3.7 — Sourcing, RFQs, Supplier Quotations & Purchase Orders: **COMPLETE & VERIFIED**
 - [x] Phase 3.8 — Goods Receipt Notes (GRN), Inventory Receiving & Inspection: **COMPLETE & VERIFIED**
-- [ ] Phase 3.9 — Supplier Billing + AP + Accounting
+- [x] Phase 3.9 — Supplier Billing + AP Integration + Three-Way Matching: **COMPLETE & VERIFIED**
 - [ ] Phase 3.10 — Procurement Returns
 - [ ] Phase 3.11 — Commercial Reporting & UX
 - [ ] Phase 3.12 — Phase 3 Full Verification Gate
@@ -148,8 +149,8 @@ This file tracks actual implementation progress. Do not mark a capability comple
 - [x] Supplier quotations
 - [x] Purchase orders
 - [x] GRN
-- [ ] Purchase invoices
-- [ ] Three-way matching
+- [x] Purchase invoices (Supplier Bills)
+- [x] Three-way matching
 
 ## Phase 4 — People, Projects, Assets, Expenses
 - [ ] HR
