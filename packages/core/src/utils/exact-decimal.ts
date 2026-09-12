@@ -96,6 +96,18 @@ export class ExactDecimal {
     return new ExactDecimal(isNegative ? -rawBigInt : rawBigInt, maxScale);
   }
 
+  public static fromBigInt(rawBigInt: bigint, scale: number = 2): ExactDecimal {
+    return new ExactDecimal(rawBigInt, scale);
+  }
+
+  public static add(a: ExactDecimal, b: ExactDecimal): ExactDecimal {
+    return a.add(b);
+  }
+
+  public static sub(a: ExactDecimal, b: ExactDecimal): ExactDecimal {
+    return a.sub(b);
+  }
+
   /**
    * Adds two ExactDecimal instances.
    */

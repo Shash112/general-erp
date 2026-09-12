@@ -123,6 +123,7 @@ This file tracks actual implementation progress. Do not mark a capability comple
 - Phase 3.5 Implementation Report: `docs/PHASE_3_5_IMPLEMENTATION_REPORT.md` (Complete & Verified)
 - Phase 3.6 Implementation Report: `docs/PHASE_3_6_IMPLEMENTATION_REPORT.md` (Complete & Verified)
 - Phase 3.7 Implementation Report: `docs/PHASE_3_7_IMPLEMENTATION_REPORT.md` (Complete & Verified)
+- Phase 3.8 Implementation Report: `docs/PHASE_3_8_IMPLEMENTATION_REPORT.md` (Complete & Verified)
 - [x] Phase 3.0 — Shared Commercial Foundation: **COMPLETE / APPROVED**
 - [x] Phase 3.1 — Sales Foundation & Quotations: **COMPLETE / APPROVED**
 - [x] Phase 3.2 — Sales Orders: **COMPLETE / APPROVED**
@@ -131,7 +132,7 @@ This file tracks actual implementation progress. Do not mark a capability comple
 - [x] Phase 3.5 — Sales Returns / Credit Notes: **COMPLETE & VERIFIED**
 - [x] Phase 3.6 — Procurement Foundation & Purchase Requests: **COMPLETE & VERIFIED**
 - [x] Phase 3.7 — Sourcing, RFQs, Supplier Quotations & Purchase Orders: **COMPLETE & VERIFIED**
-- [ ] Phase 3.8 — Goods Receipt Notes (GRN) & Receiving
+- [x] Phase 3.8 — Goods Receipt Notes (GRN), Inventory Receiving & Inspection: **COMPLETE & VERIFIED**
 - [ ] Phase 3.9 — Supplier Billing + AP + Accounting
 - [ ] Phase 3.10 — Procurement Returns
 - [ ] Phase 3.11 — Commercial Reporting & UX
@@ -146,7 +147,7 @@ This file tracks actual implementation progress. Do not mark a capability comple
 - [x] RFQ
 - [x] Supplier quotations
 - [x] Purchase orders
-- [ ] GRN
+- [x] GRN
 - [ ] Purchase invoices
 - [ ] Three-way matching
 

@@ -86,6 +86,10 @@ export interface UpdatePurchaseOrderInput {
 }
 
 export class PurchaseOrderService {
+  public clearMemoryStores(): void {
+    inMemoryOrders.length = 0;
+    inMemoryOrderLines.length = 0;
+  }
   // ==========================================================================
   // CREATE PO
   // ==========================================================================
@@ -155,6 +159,8 @@ export class PurchaseOrderService {
         description: l.description.trim(),
         uom: l.uom.trim(),
         orderedQuantity: l.orderedQuantity,
+        receivedQuantity: '0.0000',
+        acceptedQuantity: '0.0000',
         unitPrice: unitPrice.toString(),
         discount: discAmount.toString(),
         discountAmount: discAmount.toString(),

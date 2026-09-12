@@ -303,6 +303,8 @@ export const purchaseOrderLines = pgTable('purchase_order_lines', {
   uom: varchar('uom', { length: 32 }).notNull(),
 
   orderedQuantity: numeric('ordered_quantity', { precision: 18, scale: 4 }).notNull(),
+  receivedQuantity: numeric('received_quantity', { precision: 18, scale: 4 }).notNull().default('0.0000'),
+  acceptedQuantity: numeric('accepted_quantity', { precision: 18, scale: 4 }).notNull().default('0.0000'),
   unitPrice: numeric('unit_price', { precision: 15, scale: 2 }).notNull(),
 
   discount: numeric('discount', { precision: 15, scale: 2 }).notNull().default('0.00'),
