@@ -12,7 +12,9 @@ import { addressService } from '../src/modules/commercial/address.service.js';
 import { contactService } from '../src/modules/commercial/contact.service.js';
 import { productService } from '../src/modules/commercial/product.service.js';
 import { arDocumentService } from '../src/modules/finance/ar/ar-document.service.js';
+import { chartOfAccountsService } from '../src/modules/finance/chart-of-accounts.service.js';
 import { fiscalPeriodService } from '../src/modules/finance/fiscal-period.service.js';
+import { accountingConfigurationService } from '../src/modules/finance/accounting-core.service.js';
 import { masterDataService } from '../src/platform/master-data/master-data.service.js';
 import { numberingEngine } from '../src/platform/numbering/numbering.service.js';
 import { getDb, salesInvoices, salesInvoiceLines, salesOrders, arOpenItems, glJournals, eq, and, sql } from '@general-erp/database';
@@ -34,6 +36,8 @@ describe('Phase 3.4 — Sales Invoicing, AR & Accounting Domain & Suite', () => 
     quotationService.clearMemoryStores();
     arDocumentService.clear();
     fiscalPeriodService.clear();
+    chartOfAccountsService.clear();
+    accountingConfigurationService.clear();
     masterDataService.clear();
     numberingEngine.clear();
 
@@ -71,7 +75,12 @@ describe('Phase 3.4 — Sales Invoicing, AR & Accounting Domain & Suite', () => 
           'sales:invoice:cancel',
           'ar:document:create',
           'ar:document:read',
-          'ar:document:post'
+          'ar:document:post',
+          'finance:gl:post',
+          'finance:gl:create',
+          'finance:coa:admin',
+          'finance:coa:create',
+          'finance:fiscal_year:create'
         ]
       }
     };
@@ -91,6 +100,28 @@ describe('Phase 3.4 — Sales Invoicing, AR & Accounting Domain & Suite', () => 
       startDate: '2026-01-01',
       endDate: '2026-12-31'
     });
+
+    // Provision Chart of Accounts for AccountingCore GL account resolution
+    await chartOfAccountsService.applyTemplate(ctx, {
+      companyId,
+      templateId: 'INDIAN_SME_DEFAULT_V1'
+    });
+
+    const accounts = await chartOfAccountsService.getAccountsList(ctx, companyId);
+    const arAcc = accounts.find(a => a.accountCode === '1130')!;
+    const salesAcc = accounts.find(a => a.accountCode === '4100')!;
+    const cgstAcc = accounts.find(a => a.accountCode === '2120')!;
+    const sgstAcc = accounts.find(a => a.accountCode === '2121')!;
+    const igstAcc = accounts.find(a => a.accountCode === '2122')!;
+
+    const eventTypes = ['AR_INVOICE', 'SALES_INVOICE', 'AR_INVOICE_POSTED'];
+    for (const et of eventTypes) {
+      await accountingConfigurationService.setMapping(ctx, { companyId, eventType: et, lineRole: 'AR_CONTROL', accountId: arAcc.id });
+      await accountingConfigurationService.setMapping(ctx, { companyId, eventType: et, lineRole: 'SALES_REVENUE', accountId: salesAcc.id });
+      await accountingConfigurationService.setMapping(ctx, { companyId, eventType: et, lineRole: 'OUTPUT_CGST', accountId: cgstAcc.id });
+      await accountingConfigurationService.setMapping(ctx, { companyId, eventType: et, lineRole: 'OUTPUT_SGST', accountId: sgstAcc.id });
+      await accountingConfigurationService.setMapping(ctx, { companyId, eventType: et, lineRole: 'OUTPUT_IGST', accountId: igstAcc.id });
+    }
 
     // 1. Setup Master Customer
     const cust = await customerService.createCustomer(ctx, {
