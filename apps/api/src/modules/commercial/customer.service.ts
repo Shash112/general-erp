@@ -6,6 +6,7 @@ import {
   ConflictError
 } from '@general-erp/core';
 import { auditService } from '../../platform/audit/audit.service.js';
+import { masterDataService } from '../../platform/master-data/master-data.service.js';
 import { getDb, customers, NewCustomer, eq, and, sql, ilike, or } from '@general-erp/database';
 
 export interface CustomerDTO {
@@ -177,6 +178,16 @@ export class CustomerService {
         newValues: { code: codeUpper, name: input.name }
       });
 
+      const masterCust: any = {
+        id: result.id,
+        companyId: result.companyId,
+        name: result.name,
+        code: result.code,
+        creditLimit: parseFloat(result.creditLimit || '0')
+      };
+      if (result.gstin) masterCust.gstin = result.gstin;
+      await masterDataService.createCustomer(ctx, masterCust).catch(() => {});
+
       return result;
     } else {
       for (const c of this.memoryStore.values()) {
@@ -210,6 +221,17 @@ export class CustomerService {
       };
 
       this.memoryStore.set(`${ctx.tenantId}:${ctx.companyId}:${id}`, dto);
+
+      const masterCust: any = {
+        id: dto.id,
+        companyId: dto.companyId,
+        name: dto.name,
+        code: dto.code,
+        creditLimit: parseFloat(dto.creditLimit || '0')
+      };
+      if (dto.gstin) masterCust.gstin = dto.gstin;
+      await masterDataService.createCustomer(ctx, masterCust).catch(() => {});
+
       return dto;
     }
   }

@@ -6,6 +6,7 @@ import {
   ConflictError
 } from '@general-erp/core';
 import { auditService } from '../../platform/audit/audit.service.js';
+import { masterDataService } from '../../platform/master-data/master-data.service.js';
 import { getDb, products, NewProduct, eq, and, sql, ilike, or } from '@general-erp/database';
 
 export interface ProductDTO {
@@ -176,6 +177,19 @@ export class ProductService {
         newValues: { code: codeUpper, sku: skuUpper, name: input.name }
       });
 
+      const masterProd: any = {
+        id: result.id,
+        companyId: result.companyId,
+        name: result.name,
+        code: result.code,
+        sku: result.sku,
+        uom: result.baseUom,
+        purchasePrice: parseFloat(result.purchasePrice || '0'),
+        sellingPrice: parseFloat(result.sellingPrice || '0')
+      };
+      if (result.hsnSac) masterProd.hsnSac = result.hsnSac;
+      await masterDataService.createProduct(ctx, masterProd).catch(() => {});
+
       return result;
     } else {
       // Memory Store Fallback
@@ -211,6 +225,20 @@ export class ProductService {
       };
 
       this.memoryStore.set(`${ctx.tenantId}:${ctx.companyId}:${id}`, dto);
+
+      const masterProd: any = {
+        id: dto.id,
+        companyId: dto.companyId,
+        name: dto.name,
+        code: dto.code,
+        sku: dto.sku,
+        uom: dto.baseUom,
+        purchasePrice: parseFloat(dto.purchasePrice || '0'),
+        sellingPrice: parseFloat(dto.sellingPrice || '0')
+      };
+      if (dto.hsnSac) masterProd.hsnSac = dto.hsnSac;
+      await masterDataService.createProduct(ctx, masterProd).catch(() => {});
+
       return dto;
     }
   }
