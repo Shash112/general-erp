@@ -6,9 +6,11 @@ Build the General ERP product defined by `docs/PRODUCT_REQUIREMENTS_SPECIFICATIO
 Primary product principle: **Simple by default. Powerful when needed.**
 
 ## Source of truth
-1. `docs/PRODUCT_REQUIREMENTS_SPECIFICATION.md` — product requirements and locked architectural decisions.
+1. `docs/PRODUCT_REQUIREMENTS_SPECIFICATION.md` — product requirements.
 2. `docs/AGENT_DEVELOPMENT_GUIDE.md` — engineering rules for the AI agent.
-3. Current source code and tests — source of truth for already-implemented behavior.
+3. `docs/DECISIONS.md` — accepted architectural decisions.
+4. Current source code and tests — source of truth for already-implemented behavior.
+5. `docs/MASTER_REMAINING_ARCHITECTURE_AND_IMPLEMENTATION_PLAN.md` — master architecture and roadmap for remaining work.
 
 If a requirement is ambiguous, do not silently invent business behavior. Record the ambiguity in `docs/DECISIONS.md`, choose the safest reversible implementation, and continue only when the choice does not affect financial/legal correctness. Ask the human when it does.
 
@@ -20,7 +22,7 @@ If a requirement is ambiguous, do not silently invent business behavior. Record 
 - Domain logic belongs in backend/domain services, never in UI-only code.
 - API-first: all important capabilities must be exposed through stable APIs.
 - Configuration over customization: solve customer differences with configuration, custom fields/forms, workflows, rules, reports, templates, plugins, and integrations.
-- Financially relevant operations must go through the Accounting Engine.
+- Financially relevant operations must go through the Accounting Engine / AccountingCore.
 - Posted financial records are immutable; corrections use proper reversal/credit/debit mechanisms.
 - AI must use approved ERP tools and must never execute arbitrary SQL or bypass authorization, rules, approvals, accounting controls, or audit logging.
 
@@ -99,24 +101,37 @@ A feature is not complete when CRUD works. It is complete only when applicable r
 - tests
 - documentation
 
+## Master-plan implementation model
+The architecture for remaining work is planned once in `docs/MASTER_REMAINING_ARCHITECTURE_AND_IMPLEMENTATION_PLAN.md`.
+
+The normal workflow is:
+
+`MASTER ARCHITECTURE -> IMPLEMENTATION SLICE -> VERIFY -> STATUS/REPORT -> NEXT SLICE`
+
+Do **not** create a new architecture plan or formal architecture-review gate for every phase/item. Read the master plan, inspect the current repository, and implement the next ordered slice.
+
+Architecture may be reopened only when implementation discovers a material conflict involving financial correctness, legal/statutory correctness, security/data isolation, data integrity, migration compatibility, a broken cross-domain contract, or unavoidable scope change. In that case, record/update an ADR and amend the master plan before proceeding.
+
 ## Agent behavior
 Before coding:
 1. Read the relevant PRS sections.
-2. Inspect the existing repository and conventions.
-3. Identify dependencies and authoritative ownership.
-4. State a concise implementation plan.
+2. Read the relevant section of the master remaining architecture/implementation plan.
+3. Inspect the existing repository and conventions.
+4. Identify dependencies and authoritative ownership.
+5. State a concise implementation-slice plan; do not re-plan the architecture.
 
 While coding:
 1. Make the smallest coherent change that advances the current milestone.
 2. Reuse platform engines instead of creating local alternatives.
 3. Keep backend business logic authoritative.
 4. Add tests with the feature.
-5. Update docs/decisions when architecture changes.
+5. Update docs/decisions when architecture materially changes.
 
 After coding:
 1. Run formatter, typecheck, lint, unit/integration tests, and relevant build checks.
 2. Review for security, data integrity, auditability, and customer customization.
-3. Report changed files, tests run, known limitations, and next recommended step.
+3. Update `docs/IMPLEMENTATION_STATUS.md` and add/update the implementation report as appropriate.
+4. Report changed files, tests run, known limitations, and next implementation slice.
 
 ## Forbidden shortcuts
 - Do not generate the whole ERP in one pass.
@@ -126,4 +141,5 @@ After coding:
 - Do not put accounting logic in controllers/components.
 - Do not let AI write arbitrary SQL or call internal DB APIs directly.
 - Do not bypass permissions/approval/audit for convenience.
-- Do not silently change the PRS.
+- Do not silently change the PRS or master architecture.
+- Do not silently start a different implementation slice before the current slice is verified.
