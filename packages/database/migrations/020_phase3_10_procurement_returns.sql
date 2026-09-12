@@ -1,0 +1,178 @@
+-- Migration 020: Phase 3.10 — Procurement Returns & Supplier Debit Notes Schema
+
+-- 1. Add returned_quantity to goods_receipt_lines
+ALTER TABLE goods_receipt_lines ADD COLUMN IF NOT EXISTS returned_quantity NUMERIC(18, 4) NOT NULL DEFAULT '0.0000';
+
+-- 2. Create procurement_returns Table
+CREATE TABLE IF NOT EXISTS procurement_returns (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id VARCHAR(64) NOT NULL,
+  company_id UUID NOT NULL REFERENCES companies(id),
+  branch_id UUID,
+  return_number VARCHAR(64) NOT NULL,
+  supplier_id UUID NOT NULL REFERENCES suppliers(id),
+  purchase_order_id UUID REFERENCES purchase_orders(id),
+  goods_receipt_id UUID REFERENCES goods_receipts(id),
+  original_supplier_bill_id UUID REFERENCES supplier_bills(id),
+  return_date VARCHAR(10) NOT NULL,
+  reason TEXT NOT NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'DRAFT',
+  notes TEXT,
+  currency VARCHAR(3) NOT NULL DEFAULT 'INR',
+  subtotal_amount NUMERIC(15, 2) NOT NULL DEFAULT '0.00',
+  discount_amount NUMERIC(15, 2) NOT NULL DEFAULT '0.00',
+  taxable_amount NUMERIC(15, 2) NOT NULL DEFAULT '0.00',
+  cgst_amount NUMERIC(15, 2) NOT NULL DEFAULT '0.00',
+  sgst_amount NUMERIC(15, 2) NOT NULL DEFAULT '0.00',
+  igst_amount NUMERIC(15, 2) NOT NULL DEFAULT '0.00',
+  utgst_amount NUMERIC(15, 2) NOT NULL DEFAULT '0.00',
+  cess_amount NUMERIC(15, 2) NOT NULL DEFAULT '0.00',
+  tax_amount NUMERIC(15, 2) NOT NULL DEFAULT '0.00',
+  total_amount NUMERIC(15, 2) NOT NULL DEFAULT '0.00',
+  debit_note_id UUID,
+  version INTEGER NOT NULL DEFAULT 1,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  created_by UUID NOT NULL,
+  updated_by UUID NOT NULL,
+  approved_by UUID REFERENCES users(id),
+  approved_at TIMESTAMP,
+  cancelled_by UUID REFERENCES users(id),
+  cancelled_at TIMESTAMP,
+  cancellation_reason TEXT,
+  CONSTRAINT uq_procurement_return_tenant_company_num UNIQUE(tenant_id, company_id, return_number),
+  CONSTRAINT chk_procurement_return_status CHECK (status IN ('DRAFT', 'SUBMITTED', 'APPROVED', 'COMPLETED', 'CANCELLED'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_procurement_return_supplier ON procurement_returns(tenant_id, company_id, supplier_id);
+CREATE INDEX IF NOT EXISTS idx_procurement_return_po ON procurement_returns(tenant_id, company_id, purchase_order_id);
+CREATE INDEX IF NOT EXISTS idx_procurement_return_grn ON procurement_returns(tenant_id, company_id, goods_receipt_id);
+CREATE INDEX IF NOT EXISTS idx_procurement_return_status ON procurement_returns(tenant_id, company_id, status);
+
+-- 3. Create procurement_return_lines Table
+CREATE TABLE IF NOT EXISTS procurement_return_lines (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  return_id UUID NOT NULL REFERENCES procurement_returns(id) ON DELETE CASCADE,
+  tenant_id VARCHAR(64) NOT NULL,
+  company_id UUID NOT NULL,
+  line_number INTEGER NOT NULL,
+  purchase_order_line_id UUID REFERENCES purchase_order_lines(id),
+  goods_receipt_line_id UUID REFERENCES goods_receipt_lines(id),
+  supplier_bill_line_id UUID REFERENCES supplier_bill_lines(id),
+  product_id UUID REFERENCES products(id),
+  product_code_snapshot VARCHAR(64),
+  product_name_snapshot VARCHAR(255),
+  description TEXT NOT NULL,
+  uom VARCHAR(32) NOT NULL,
+  accepted_quantity NUMERIC(18, 4) NOT NULL DEFAULT '0.0000',
+  previously_returned_quantity NUMERIC(18, 4) NOT NULL DEFAULT '0.0000',
+  returned_quantity NUMERIC(18, 4) NOT NULL,
+  unit_price NUMERIC(18, 4) NOT NULL,
+  discount_percent NUMERIC(5, 2) NOT NULL DEFAULT '0.00',
+  discount_amount NUMERIC(15, 2) NOT NULL DEFAULT '0.00',
+  gross_amount NUMERIC(15, 2) NOT NULL,
+  taxable_amount NUMERIC(15, 2) NOT NULL,
+  hsn_sac VARCHAR(16),
+  cgst_rate NUMERIC(5, 2) NOT NULL DEFAULT '0.00',
+  cgst_amount NUMERIC(15, 2) NOT NULL DEFAULT '0.00',
+  sgst_rate NUMERIC(5, 2) NOT NULL DEFAULT '0.00',
+  sgst_amount NUMERIC(15, 2) NOT NULL DEFAULT '0.00',
+  igst_rate NUMERIC(5, 2) NOT NULL DEFAULT '0.00',
+  igst_amount NUMERIC(15, 2) NOT NULL DEFAULT '0.00',
+  utgst_amount NUMERIC(15, 2) NOT NULL DEFAULT '0.00',
+  cess_amount NUMERIC(15, 2) NOT NULL DEFAULT '0.00',
+  tax_amount NUMERIC(15, 2) NOT NULL DEFAULT '0.00',
+  line_total NUMERIC(15, 2) NOT NULL,
+  expense_account_id VARCHAR(64),
+  reason TEXT,
+  version INTEGER NOT NULL DEFAULT 1,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  CONSTRAINT uq_procurement_return_line_num UNIQUE(return_id, line_number),
+  CONSTRAINT chk_procurement_return_line_qty_pos CHECK (returned_quantity > 0)
+);
+
+-- 4. Create supplier_debit_notes Table
+CREATE TABLE IF NOT EXISTS supplier_debit_notes (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id VARCHAR(64) NOT NULL,
+  company_id UUID NOT NULL REFERENCES companies(id),
+  branch_id UUID,
+  debit_note_number VARCHAR(64) NOT NULL,
+  procurement_return_id UUID REFERENCES procurement_returns(id),
+  original_supplier_bill_id UUID REFERENCES supplier_bills(id),
+  original_invoice_number_snapshot VARCHAR(64),
+  supplier_id UUID NOT NULL REFERENCES suppliers(id),
+  debit_note_date VARCHAR(10) NOT NULL,
+  reason TEXT NOT NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'DRAFT',
+  subtotal_amount NUMERIC(15, 2) NOT NULL DEFAULT '0.00',
+  discount_amount NUMERIC(15, 2) NOT NULL DEFAULT '0.00',
+  taxable_amount NUMERIC(15, 2) NOT NULL DEFAULT '0.00',
+  cgst_amount NUMERIC(15, 2) NOT NULL DEFAULT '0.00',
+  sgst_amount NUMERIC(15, 2) NOT NULL DEFAULT '0.00',
+  igst_amount NUMERIC(15, 2) NOT NULL DEFAULT '0.00',
+  utgst_amount NUMERIC(15, 2) NOT NULL DEFAULT '0.00',
+  cess_amount NUMERIC(15, 2) NOT NULL DEFAULT '0.00',
+  tax_amount NUMERIC(15, 2) NOT NULL DEFAULT '0.00',
+  total_amount NUMERIC(15, 2) NOT NULL DEFAULT '0.00',
+  ap_document_id UUID REFERENCES ap_documents(id),
+  journal_entry_id UUID REFERENCES journal_entries(id),
+  posted_at TIMESTAMP,
+  posted_by UUID REFERENCES users(id),
+  notes TEXT,
+  version INTEGER NOT NULL DEFAULT 1,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  created_by UUID NOT NULL,
+  updated_by UUID NOT NULL,
+  cancelled_by UUID REFERENCES users(id),
+  cancelled_at TIMESTAMP,
+  cancellation_reason TEXT,
+  CONSTRAINT uq_supplier_debit_note_tenant_company_num UNIQUE(tenant_id, company_id, debit_note_number),
+  CONSTRAINT chk_supplier_debit_note_status CHECK (status IN ('DRAFT', 'SUBMITTED', 'APPROVED', 'POSTED', 'CANCELLED'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_supplier_debit_note_supplier ON supplier_debit_notes(tenant_id, company_id, supplier_id);
+CREATE INDEX IF NOT EXISTS idx_supplier_debit_note_bill ON supplier_debit_notes(tenant_id, company_id, original_supplier_bill_id);
+CREATE INDEX IF NOT EXISTS idx_supplier_debit_note_return ON supplier_debit_notes(tenant_id, company_id, procurement_return_id);
+CREATE INDEX IF NOT EXISTS idx_supplier_debit_note_status ON supplier_debit_notes(tenant_id, company_id, status);
+
+-- 5. Create supplier_debit_note_lines Table
+CREATE TABLE IF NOT EXISTS supplier_debit_note_lines (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  debit_note_id UUID NOT NULL REFERENCES supplier_debit_notes(id) ON DELETE CASCADE,
+  procurement_return_line_id UUID REFERENCES procurement_return_lines(id),
+  goods_receipt_line_id UUID REFERENCES goods_receipt_lines(id),
+  tenant_id VARCHAR(64) NOT NULL,
+  company_id UUID NOT NULL,
+  line_number INTEGER NOT NULL,
+  product_id UUID REFERENCES products(id),
+  product_code_snapshot VARCHAR(64),
+  product_name_snapshot VARCHAR(255),
+  description TEXT NOT NULL,
+  uom VARCHAR(32) NOT NULL,
+  returned_quantity NUMERIC(18, 4) NOT NULL,
+  unit_price NUMERIC(18, 4) NOT NULL,
+  discount_percent NUMERIC(5, 2) NOT NULL DEFAULT '0.00',
+  discount_amount NUMERIC(15, 2) NOT NULL DEFAULT '0.00',
+  gross_amount NUMERIC(15, 2) NOT NULL,
+  taxable_amount NUMERIC(15, 2) NOT NULL,
+  hsn_sac VARCHAR(16),
+  cgst_rate NUMERIC(5, 2) NOT NULL DEFAULT '0.00',
+  cgst_amount NUMERIC(15, 2) NOT NULL DEFAULT '0.00',
+  sgst_rate NUMERIC(5, 2) NOT NULL DEFAULT '0.00',
+  sgst_amount NUMERIC(15, 2) NOT NULL DEFAULT '0.00',
+  igst_rate NUMERIC(5, 2) NOT NULL DEFAULT '0.00',
+  igst_amount NUMERIC(15, 2) NOT NULL DEFAULT '0.00',
+  utgst_amount NUMERIC(15, 2) NOT NULL DEFAULT '0.00',
+  cess_amount NUMERIC(15, 2) NOT NULL DEFAULT '0.00',
+  tax_amount NUMERIC(15, 2) NOT NULL DEFAULT '0.00',
+  line_total NUMERIC(15, 2) NOT NULL,
+  expense_account_id VARCHAR(64),
+  version INTEGER NOT NULL DEFAULT 1,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  CONSTRAINT uq_supplier_debit_note_line_num UNIQUE(debit_note_id, line_number),
+  CONSTRAINT chk_supplier_debit_note_line_qty_pos CHECK (returned_quantity > 0)
+);

@@ -923,6 +923,54 @@ export class GoodsReceiptService {
       };
     });
   }
+
+  /**
+   * Get GRN Line by ID
+   */
+  async getGrnLineById(_ctx: RequestContext, lineId: string): Promise<{ line: any | null }> {
+    const db = getDb();
+    if (db) {
+      try {
+        const [l] = await db.select().from(goodsReceiptLines).where(eq(goodsReceiptLines.id, lineId));
+        if (l) return { line: l };
+      } catch {
+        // Fallback
+      }
+    }
+    for (const linesList of memoryReceiptLines.values()) {
+      const found = linesList.find((l) => l.id === lineId);
+      if (found) return { line: found };
+    }
+    return { line: null };
+  }
+
+  /**
+   * Add returned quantity to GRN line
+   */
+  async addReturnedQuantityToGrnLine(_ctx: RequestContext, lineId: string, qtyStr: string): Promise<void> {
+    const db = getDb();
+    if (db) {
+      try {
+        const [l] = await db.select().from(goodsReceiptLines).where(eq(goodsReceiptLines.id, lineId));
+        if (l) {
+          const curReturned = ExactDecimal.parse((l as any).returnedQuantity || '0.0000', 4);
+          const addQty = ExactDecimal.parse(qtyStr, 4);
+          const newReturned = curReturned.add(addQty).toString();
+          await db.update(goodsReceiptLines).set({ returnedQuantity: newReturned } as any).where(eq(goodsReceiptLines.id, lineId));
+        }
+      } catch {
+        // Ignore fallback
+      }
+    }
+    for (const linesList of memoryReceiptLines.values()) {
+      const found = linesList.find((l) => l.id === lineId);
+      if (found) {
+        const curReturned = ExactDecimal.parse((found as any).returnedQuantity || '0.0000', 4);
+        const addQty = ExactDecimal.parse(qtyStr, 4);
+        (found as any).returnedQuantity = curReturned.add(addQty).toString();
+      }
+    }
+  }
 }
 
 export const goodsReceiptService = new GoodsReceiptService();

@@ -14,6 +14,7 @@ export * from './schema/purchase-request.js';
 export * from './schema/sourcing-purchase-order.js';
 export * from './schema/goods-receipt.js';
 export * from './schema/supplier-bill.js';
+export * from './schema/procurement-return.js';
 export * from './client.js';
 export { eq, and, sql, or, inArray, ilike } from 'drizzle-orm';
 
