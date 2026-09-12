@@ -22,6 +22,8 @@ import { salesInvoiceRoutes } from './routes/sales-invoice.routes.js';
 import { salesReturnRoutes } from './routes/sales-return.routes.js';
 import { salesCreditNoteRoutes } from './routes/sales-credit-note.routes.js';
 import { purchaseRequestRoutes } from './routes/purchase-request.routes.js';
+import { sourcingRoutes } from './routes/sourcing.routes.js';
+import { purchaseOrderRoutes } from './routes/purchase-order.routes.js';
 import { accountingEngine } from './platform/accounting/accounting.service.js';
 
 import { authorizationService } from './platform/authorization/authorization.service.js';
@@ -66,6 +68,8 @@ export function buildApp() {
   app.register(salesReturnRoutes);
   app.register(salesCreditNoteRoutes);
   app.register(purchaseRequestRoutes);
+  app.register(sourcingRoutes);
+  app.register(purchaseOrderRoutes);
 
 
 
