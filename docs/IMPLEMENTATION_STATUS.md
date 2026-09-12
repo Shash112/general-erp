@@ -122,7 +122,7 @@ This file tracks actual implementation progress. Do not mark a capability comple
 - [x] Phase 3.0 — Shared Commercial Foundation: **COMPLETE / APPROVED**
 - [x] Phase 3.1 — Sales Foundation & Quotations: **COMPLETE / APPROVED**
 - [x] Phase 3.2 — Sales Orders: **COMPLETE / APPROVED**
-- [ ] Phase 3.3 — Sales Delivery
+- [x] Phase 3.3 — Sales Delivery: **COMPLETE / APPROVED**
 - [ ] Phase 3.4 — Sales Invoicing + AR + Accounting
 - [ ] Phase 3.5 — Sales Returns / Credit Notes
 - [ ] Phase 3.6 — Procurement Foundation & Purchase Requests
@@ -134,7 +134,7 @@ This file tracks actual implementation progress. Do not mark a capability comple
 - [ ] Customers
 - [ ] Quotations
 - [x] Sales orders
-- [ ] Delivery
+- [x] Delivery
 - [ ] Sales invoicing
 - [ ] Suppliers
 - [ ] Purchase requisitions

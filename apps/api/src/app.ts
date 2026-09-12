@@ -17,6 +17,7 @@ import { reportingRoutes } from './routes/reporting.routes.js';
 import { commercialRoutes } from './routes/commercial.routes.js';
 import { salesRoutes } from './routes/sales.routes.js';
 import { salesOrderRoutes } from './routes/sales-order.routes.js';
+import { salesDeliveryRoutes } from './routes/sales-delivery.routes.js';
 import { accountingEngine } from './platform/accounting/accounting.service.js';
 
 import { authorizationService } from './platform/authorization/authorization.service.js';
@@ -56,6 +57,7 @@ export function buildApp() {
   app.register(commercialRoutes);
   app.register(salesRoutes);
   app.register(salesOrderRoutes);
+  app.register(salesDeliveryRoutes);
 
 
 
